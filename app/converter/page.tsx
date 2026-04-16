@@ -9,6 +9,8 @@ import {
   ThemeConfig,
   UploadedFile,
   ConversionResult,
+  ConversionStatus,
+  PageEntry,
 } from "@/types/converter";
 import {
   saveConnection,
@@ -48,6 +50,8 @@ const initialState: ConverterState = {
   conversionStatus: "idle",
   conversionResult: null,
   error: null,
+  pages: [],
+  activePageId: null,
 };
 
 export default function ConverterPage() {
@@ -113,13 +117,68 @@ export default function ConverterPage() {
     }));
   }
 
-  function handleConvert(result: ConversionResult) {
+  // ── Multi-page handlers ────────────────────────────────────────────────────
+
+  function handlePagesReady(pages: PageEntry[], thenGoToStep3 = false) {
+    const firstId = pages[0]?.id ?? null;
     setState((prev) => ({
       ...prev,
-      conversionResult: result,
-      conversionStatus: "done",
+      pages,
+      activePageId: firstId,
+      conversionStatus: "idle",
+      conversionResult: null,
       error: null,
+      // advance to step 3 in the same state update if requested
+      currentStep: thenGoToStep3 ? 3 : prev.currentStep,
     }));
+  }
+
+  function setActivePage(id: string) {
+    setState((prev) => {
+      const page = prev.pages.find((p) => p.id === id);
+      return {
+        ...prev,
+        activePageId: id,
+        conversionStatus: page?.conversionStatus ?? "idle",
+        // Only update conversionResult if the page has one — don't null it out
+        // (Step4Deploy reads conversionResult from pages[] directly)
+        conversionResult: page?.conversionResult ?? prev.conversionResult,
+        error: page?.error ?? null,
+      };
+    });
+  }
+
+  function handleConvert(result: ConversionResult) {
+    setState((prev) => {
+      const pages = prev.pages.map((p) =>
+        p.id === prev.activePageId
+          ? { ...p, conversionStatus: "done" as ConversionStatus, conversionResult: result, error: null }
+          : p
+      );
+      return {
+        ...prev,
+        pages,
+        conversionResult: result,
+        conversionStatus: "done",
+        error: null,
+      };
+    });
+  }
+
+  function handleConversionStatusChange(status: ConversionStatus, error?: string) {
+    setState((prev) => {
+      const pages = prev.pages.map((p) =>
+        p.id === prev.activePageId
+          ? { ...p, conversionStatus: status, error: error ?? null }
+          : p
+      );
+      return {
+        ...prev,
+        pages,
+        conversionStatus: status,
+        error: error ?? null,
+      };
+    });
   }
 
   function handleConnectionSuccess(connection: WpConnection, profile: WpUserProfile) {
@@ -137,6 +196,17 @@ export default function ConverterPage() {
     setState(initialState);
     window.dispatchEvent(new Event("wp_logout"));
   }
+
+  // Active page derived data
+  const activePage = state.pages.find((p) => p.id === state.activePageId) ?? null;
+
+  // For Step3: only pass the HTML file for the active page + all CSS/JS/images
+  const activePageFiles: UploadedFile[] = state.pages.length > 0 && activePage
+    ? [
+        ...state.uploadedFiles.filter((f) => f.type !== "html"),
+        ...state.uploadedFiles.filter((f) => f.type === "html" && f.name === activePage.htmlFileName),
+      ]
+    : state.uploadedFiles;
 
   return (
     <div>
@@ -169,6 +239,7 @@ export default function ConverterPage() {
           onAddFiles={addFiles}
           onRemoveFile={removeFile}
           onUpdateThemeConfig={updateThemeConfig}
+          onPagesReady={handlePagesReady}
           onNext={() => goToStep(3)}
           onBack={() => goToStep(1)}
         />
@@ -176,14 +247,23 @@ export default function ConverterPage() {
 
       {state.currentStep === 3 && (
         <Step3Convert
-          uploadedFiles={state.uploadedFiles}
+          uploadedFiles={activePageFiles}
           themeConfig={state.themeConfig}
           conversionStatus={state.conversionStatus}
           conversionResult={state.conversionResult}
           error={state.error}
+          pages={state.pages}
+          activePageId={state.activePageId}
+          onSetActivePage={(id) => {
+            setActivePage(id);
+          }}
           onConvert={handleConvert}
+          onStatusChange={handleConversionStatusChange}
           onNext={() => goToStep(4)}
-          onBack={() => goToStep(2)}
+          onBack={() => {
+            handleConversionStatusChange("idle");
+            goToStep(2);
+          }}
         />
       )}
 
@@ -192,6 +272,9 @@ export default function ConverterPage() {
           conversionResult={state.conversionResult}
           wpConnection={state.wpConnection}
           themeConfig={state.themeConfig}
+          pages={state.pages}
+          activePageId={state.activePageId}
+          onSetActivePage={setActivePage}
           onBack={() => goToStep(3)}
         />
       )}

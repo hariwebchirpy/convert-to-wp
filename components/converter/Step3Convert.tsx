@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import {
   CheckCircle,
   XCircle,
@@ -15,6 +15,7 @@ import {
   ConversionStatus,
   ConversionResult,
   ProgressStep,
+  PageEntry,
 } from "@/types/converter";
 import { parseHtml } from "@/lib/converter/parseHtml";
 import { buildTheme } from "@/lib/converter/buildTheme";
@@ -29,6 +30,7 @@ import {
 } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
 import WidgetMapTree from "@/components/converter/WidgetMapTree";
+import JsonInspector from "@/components/converter/JsonInspector";
 
 interface Props {
   uploadedFiles: UploadedFile[];
@@ -36,7 +38,11 @@ interface Props {
   conversionStatus: ConversionStatus;
   conversionResult: ConversionResult | null;
   error: string | null;
+  pages: PageEntry[];
+  activePageId: string | null;
+  onSetActivePage: (id: string) => void;
   onConvert: (result: ConversionResult) => void;
+  onStatusChange: (status: ConversionStatus, error?: string) => void;
   onNext: () => void;
   onBack: () => void;
 }
@@ -53,7 +59,7 @@ const INITIAL_STEPS: ProgressStep[] = [
 ];
 
 const FILE_TABS: {
-  key: keyof Omit<ConversionResult, "assetFiles" | "widgetMap">;
+  key: keyof Omit<ConversionResult, "assetFiles" | "widgetMap" | "elementorJson" | "rawHtml">;
   label: string;
 }[] = [
   { key: "styleCss",      label: "style.css" },
@@ -61,7 +67,6 @@ const FILE_TABS: {
   { key: "headerPhp",     label: "header.php" },
   { key: "footerPhp",     label: "footer.php" },
   { key: "indexPhp",      label: "index.php" },
-  { key: "elementorJson", label: "elementor.json" },
 ];
 
 // ── Sub-components ────────────────────────────────────────────────────────────
@@ -140,13 +145,27 @@ export default function Step3Convert({
   conversionStatus,
   conversionResult,
   error,
+  pages,
+  activePageId,
+  onSetActivePage,
   onConvert,
+  onStatusChange,
   onNext,
   onBack,
 }: Props) {
   const [progressSteps, setProgressSteps] =
     useState<ProgressStep[]>(INITIAL_STEPS);
   const [activeTab, setActiveTab] = useState("widget-map");
+
+  // Reset progress steps when switching to a different page
+  const prevPageId = useRef(activePageId);
+  useEffect(() => {
+    if (activePageId !== prevPageId.current) {
+      prevPageId.current = activePageId;
+      setProgressSteps(INITIAL_STEPS);
+      setActiveTab("widget-map");
+    }
+  }, [activePageId]);
 
   function setStep(
     index: number,
@@ -163,6 +182,7 @@ export default function Step3Convert({
   async function runConversion() {
     setProgressSteps(INITIAL_STEPS);
     setActiveTab("widget-map");
+    onStatusChange("converting");
 
     try {
       setStep(0, "running");
@@ -214,6 +234,7 @@ export default function Step3Convert({
             : s
         );
       });
+      onStatusChange("error", msg);
     }
   }
 
@@ -228,8 +249,45 @@ export default function Step3Convert({
     : 0;
   const sectionCount = conversionResult?.widgetMap.length ?? 0;
 
+  // Status icon for page tabs
+  function pageTabIcon(page: PageEntry) {
+    if (page.conversionStatus === "done")      return <CheckCircle className="w-3.5 h-3.5 text-green-500" />;
+    if (page.conversionStatus === "converting") return <Loader2 className="w-3.5 h-3.5 text-blue-500 animate-spin" />;
+    if (page.conversionStatus === "error")     return <XCircle className="w-3.5 h-3.5 text-red-500" />;
+    return <Circle className="w-3.5 h-3.5 text-muted-foreground/40" />;
+  }
+
+  const allDone = pages.length > 0 && pages.every((p) => p.conversionStatus === "done");
+
   return (
     <div className="max-w-2xl mx-auto space-y-6 px-4 pb-8">
+
+      {/* ── Page tabs (multi-page) ── */}
+      {pages.length > 1 && (
+        <Card>
+          <CardContent className="pt-4 pb-3">
+            <p className="text-xs text-muted-foreground mb-2 font-medium">Pages — convert each one:</p>
+            <div className="flex flex-wrap gap-2">
+              {pages.map((page) => (
+                <button
+                  key={page.id}
+                  onClick={() => onSetActivePage(page.id)}
+                  className={cn(
+                    "flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs font-mono transition-colors",
+                    page.id === activePageId
+                      ? "border-primary bg-primary/5 text-primary font-semibold"
+                      : "border-muted hover:border-muted-foreground/40 text-muted-foreground hover:text-foreground"
+                  )}
+                >
+                  {pageTabIcon(page)}
+                  {page.htmlFileName}
+                </button>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
       {/* ── Idle: summary + start button ── */}
       {conversionStatus === "idle" && (
         <Card>
@@ -331,6 +389,9 @@ export default function Step3Convert({
                     {tab.label}
                   </TabsTrigger>
                 ))}
+                <TabsTrigger value="elementor.json" className="font-mono text-xs">
+                  elementor.json
+                </TabsTrigger>
               </TabsList>
 
               {/* Widget Map content */}
@@ -352,6 +413,11 @@ export default function Step3Convert({
                   <CodeBlock content={conversionResult[tab.key]} />
                 </TabsContent>
               ))}
+
+              {/* elementor.json tab — split pane with inline issue annotations */}
+              <TabsContent value="elementor.json">
+                <JsonInspector json={conversionResult.elementorJson} />
+              </TabsContent>
             </Tabs>
 
             {/* Stats bar */}
@@ -391,10 +457,14 @@ export default function Step3Convert({
         </Button>
         <Button
           className="flex-1"
-          disabled={conversionStatus !== "done"}
+          disabled={pages.length > 1 ? !allDone : conversionStatus !== "done"}
           onClick={onNext}
         >
-          Next: Deploy →
+          {pages.length > 1
+            ? allDone
+              ? "Next: Deploy All Pages →"
+              : `Convert all pages to continue (${pages.filter((p) => p.conversionStatus === "done").length}/${pages.length} done)`
+            : "Next: Deploy →"}
         </Button>
       </div>
     </div>

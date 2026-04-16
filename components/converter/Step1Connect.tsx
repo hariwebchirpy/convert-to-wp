@@ -83,10 +83,6 @@ export default function Step1Connect({
       setConnectedProfile(result.profile);
       onUpdateWpConnection({ isConnected: true });
       onConnectionSuccess(wpConnection, result.profile);
-
-      setTimeout(() => {
-        onNext();
-      }, 1000);
     } else {
       setTestStatus("error");
       onUpdateWpConnection({ isConnected: false });

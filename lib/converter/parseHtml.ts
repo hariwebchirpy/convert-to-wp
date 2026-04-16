@@ -2,6 +2,26 @@ import { ParsedHtml, ParsedSection } from "@/types/converter";
 
 const BLOCK_TAGS = new Set(["section", "div", "article", "aside"]);
 
+// ── Unwrap single-child wrapper divs ─────────────────────────────────────────
+// Many pages wrap everything in one <div class="wrapper"> or similar.
+// If the body (minus header/footer/nav) has only ONE block child and that
+// child itself contains multiple block children, step into it.
+function unwrapSingleWrapper(root: Element): Element {
+  const blockChildren = Array.from(root.children).filter((el) =>
+    BLOCK_TAGS.has(el.tagName.toLowerCase())
+  );
+  if (blockChildren.length === 1) {
+    const only = blockChildren[0];
+    const innerBlocks = Array.from(only.children).filter((el) =>
+      BLOCK_TAGS.has(el.tagName.toLowerCase())
+    );
+    if (innerBlocks.length > 1) {
+      return only; // step into the wrapper
+    }
+  }
+  return root;
+}
+
 export function parseHtml(htmlContent: string): ParsedHtml {
   const doc = new DOMParser().parseFromString(htmlContent, "text/html");
 
@@ -46,10 +66,16 @@ export function parseHtml(htmlContent: string): ParsedHtml {
     sectionRoot = bodyClone;
   }
 
+  // Unwrap single wrapper divs (e.g. <div class="bg-tripsillay">…all sections…</div>)
+  sectionRoot = unwrapSingleWrapper(sectionRoot);
+
   // ── sections ──
+  // Strategy 1: look for direct block children with id/class
+  // Strategy 2: if none found (or only 1), look for <section> tags anywhere in subtree
   let sectionCounter = 0;
   const sections: ParsedSection[] = [];
 
+  // First pass — direct children
   for (const child of Array.from(sectionRoot.children)) {
     const tag = child.tagName.toLowerCase();
     if (!BLOCK_TAGS.has(tag)) continue;
@@ -60,8 +86,43 @@ export function parseHtml(htmlContent: string): ParsedHtml {
     sectionCounter++;
     const id =
       child.id.trim() !== "" ? child.id.trim() : `section-${sectionCounter}`;
-
     sections.push({ id, html: child.outerHTML, tag });
+  }
+
+  // If we only found 0 or 1 direct section, dig deeper for <section> elements
+  if (sections.length <= 1) {
+    sections.length = 0;
+    sectionCounter = 0;
+
+    // Collect all <section> elements in the tree (but not nested sections inside sections)
+    const allSections = Array.from(sectionRoot.querySelectorAll("section"));
+    // Filter out sections that are nested inside another section
+    const topLevelSections = allSections.filter(
+      (s) => !s.parentElement?.closest("section")
+    );
+
+    if (topLevelSections.length > 0) {
+      for (const el of topLevelSections) {
+        sectionCounter++;
+        const id =
+          el.id.trim() !== ""
+            ? el.id.trim()
+            : el.className.trim().split(" ")[0] || `section-${sectionCounter}`;
+        sections.push({ id, html: el.outerHTML, tag: "section" });
+      }
+    } else {
+      // Last resort: all direct block children regardless of id/class
+      for (const child of Array.from(sectionRoot.children)) {
+        const tag = child.tagName.toLowerCase();
+        if (!BLOCK_TAGS.has(tag)) continue;
+        sectionCounter++;
+        const id =
+          child.id.trim() !== ""
+            ? child.id.trim()
+            : child.className.trim().split(" ")[0] || `section-${sectionCounter}`;
+        sections.push({ id, html: child.outerHTML, tag });
+      }
+    }
   }
 
   return {

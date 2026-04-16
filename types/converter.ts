@@ -19,6 +19,13 @@ export interface ParsedHtml {
 
 export type ConversionStatus = "idle" | "converting" | "done" | "error";
 
+export interface WpTheme {
+  stylesheet: string;   // theme slug / directory name
+  name: string;         // human-readable name
+  status: "active" | "inactive";
+  screenshot?: string;  // screenshot URL if available
+}
+
 export interface WpConnection {
   siteUrl: string;
   username: string;
@@ -50,6 +57,7 @@ export interface ConversionResult {
   functionsPhp: string;
   styleCss: string;
   elementorJson: string;
+  rawHtml: string;       // plain HTML body content for WP REST push
   assetFiles: UploadedFile[];
   widgetMap: WidgetMapItem[];
 }
@@ -60,6 +68,7 @@ export interface PushResult {
   pageUrl?: string;
   editUrl?: string;
   error?: string;
+  warning?: string;
 }
 
 export interface ProgressStep {
@@ -136,13 +145,27 @@ export function randomId(): string {
   return Math.random().toString(16).slice(2, 10);
 }
 
+// ── Multi-page support ────────────────────────────────────────────────────────
+
+export interface PageEntry {
+  id: string;              // crypto.randomUUID()
+  htmlFileName: string;    // e.g. "index.html"
+  conversionStatus: ConversionStatus;
+  conversionResult: ConversionResult | null;
+  error: string | null;
+}
+
 export interface ConverterState {
   currentStep: ConverterStep;
   wpConnection: WpConnection;
   userProfile: WpUserProfile | null;
   uploadedFiles: UploadedFile[];
   themeConfig: ThemeConfig;
+  // Legacy single-page fields (kept for Step3/Step4 compat during migration)
   conversionStatus: ConversionStatus;
   conversionResult: ConversionResult | null;
   error: string | null;
+  // Multi-page
+  pages: PageEntry[];
+  activePageId: string | null;
 }
