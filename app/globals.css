@@ -127,3 +127,37 @@
     @apply font-sans;
     }
 }
+
+/* ── Accordion animations ── */
+@keyframes accordion-down {
+  from { height: 0; }
+  to   { height: var(--radix-accordion-content-height); }
+}
+@keyframes accordion-up {
+  from { height: var(--radix-accordion-content-height); }
+  to   { height: 0; }
+}
+.animate-accordion-down { animation: accordion-down 0.2s ease-out; }
+.animate-accordion-up   { animation: accordion-up   0.2s ease-out; }
+
+/* ── Landing page hero dot-grid ── */
+.hero-dots {
+  background-image: radial-gradient(circle, #d1d5db 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+
+/* ── Step4 confetti dots ── */
+@keyframes confetti-rise {
+  0%   { transform: translateY(0) scale(1); opacity: 1; }
+  80%  { opacity: 0.8; }
+  100% { transform: translateY(-120px) scale(0.4); opacity: 0; }
+}
+
+.confetti-dot {
+  position: absolute;
+  bottom: 12px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  animation: confetti-rise 0.9s ease-out forwards;
+}
