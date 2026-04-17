@@ -1,0 +1,8 @@
+{
+  "skills": [
+    {
+      "name": "converter",
+      "description": "HTML-to-WordPress converter project skill — architecture, pipeline, widget mapping, WP API patterns"
+    }
+  ]
+}

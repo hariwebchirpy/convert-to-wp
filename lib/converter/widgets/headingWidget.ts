@@ -1,16 +1,15 @@
 import { ElementorWidget, randomId } from "@/types/converter";
+import {
+  extractTypography,
+  extractAlignment,
+  buildTypographySettings,
+} from "./styleParser";
 
 export function buildHeadingWidget(element: Element): ElementorWidget {
-  const text = element.textContent?.trim() ?? "";
-  const tag = element.tagName.toLowerCase();
-  const cls = element.getAttribute("class") ?? "";
-
-  let align: "left" | "center" | "right" = "left";
-  if (cls.includes("center") || cls.includes("text-center")) {
-    align = "center";
-  } else if (cls.includes("right") || cls.includes("text-right")) {
-    align = "right";
-  }
+  const text = element.innerHTML.trim();
+  const tag = element.tagName.toLowerCase() as "h1" | "h2" | "h3" | "h4" | "h5" | "h6";
+  const typo = extractTypography(element);
+  const align = extractAlignment(element);
 
   return {
     id: randomId(),
@@ -20,7 +19,8 @@ export function buildHeadingWidget(element: Element): ElementorWidget {
       title: text,
       header_size: tag,
       align,
-      title_color: "",
+      title_color: typo.color ?? "",
+      ...buildTypographySettings(typo),
     },
     elements: [],
   };

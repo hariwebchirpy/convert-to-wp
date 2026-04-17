@@ -23,6 +23,9 @@ function unwrapSingleWrapper(root: Element): Element {
 }
 
 export function parseHtml(htmlContent: string): ParsedHtml {
+  console.group("[parseHtml] Starting HTML parse");
+  console.log(`[parseHtml] Input size: ${Math.round(htmlContent.length / 1024)}KB`);
+
   const doc = new DOMParser().parseFromString(htmlContent, "text/html");
 
   // ── title ──
@@ -124,6 +127,18 @@ export function parseHtml(htmlContent: string): ParsedHtml {
       }
     }
   }
+
+  console.log(`[parseHtml] Title: "${title}"`);
+  console.log(`[parseHtml] Header HTML: ${Math.round(headerHtml.length / 1024)}KB`);
+  console.log(`[parseHtml] Footer HTML: ${Math.round(footerHtml.length / 1024)}KB`);
+  console.log(`[parseHtml] Main HTML: ${Math.round(mainHtml.length / 1024)}KB`);
+  console.log(`[parseHtml] Sections found: ${sections.length}`);
+  sections.forEach((s, i) =>
+    console.log(`  [section ${i + 1}] id="${s.id}" tag=<${s.tag}> size=${Math.round(s.html.length / 1024)}KB`)
+  );
+  console.log(`[parseHtml] Linked CSS files: ${linkedCssFiles.length}`, linkedCssFiles);
+  console.log(`[parseHtml] Linked JS files: ${linkedJsFiles.length}`, linkedJsFiles);
+  console.groupEnd();
 
   return {
     headContent,

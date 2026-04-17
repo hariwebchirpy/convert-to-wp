@@ -15,10 +15,13 @@ import {
   WpConnection,
   ThemeConfig,
   PushResult,
+  TemplateResult,
+  ChildThemeDeployResult,
   PageEntry,
+  WpTheme,
 } from "@/types/converter";
 import { buildAndDownloadZip } from "@/lib/converter/buildZip";
-import { pushToWordPress } from "@/lib/converter/wpApi";
+import { pushToWordPress, fetchWpThemes, pushAsElementorTemplate, deployChildTheme, downloadHelperPluginZip, checkHelperPlugin } from "@/lib/converter/wpApi";
 import {
   Card,
   CardContent,
@@ -87,6 +90,24 @@ export default function Step4Deploy({
   const [showDownloadConfetti, setShowDownloadConfetti] = useState(false);
   const [showPushConfetti, setShowPushConfetti] = useState(false);
 
+  // Template deploy state
+  const [themes, setThemes] = useState<WpTheme[]>([]);
+  const [themesStatus, setThemesStatus] = useState<"idle" | "loading" | "done" | "error">("idle");
+  const [selectedTheme, setSelectedTheme] = useState<string | null>(null);
+  const [templateStatus, setTemplateStatus] = useState<ActionStatus>("idle");
+  const [templateResult, setTemplateResult] = useState<TemplateResult | null>(null);
+  const [templateProgress, setTemplateProgress] = useState<string | null>(null);
+
+  // Child theme deploy state
+  const [childThemeStatus, setChildThemeStatus] = useState<ActionStatus>("idle");
+  const [childThemeResult, setChildThemeResult] = useState<ChildThemeDeployResult | null>(null);
+  const [childThemeProgress, setChildThemeProgress] = useState<string | null>(null);
+  const [helperPluginActive, setHelperPluginActive] = useState<boolean | null>(null);
+  const [checkingHelper, setCheckingHelper] = useState(false);
+  const [customStyleCss, setCustomStyleCss] = useState<string | null>(null);
+  const [customStyleDragging, setCustomStyleDragging] = useState(false);
+  const customStyleInputRef = useRef<HTMLInputElement>(null);
+
   // Per-page push state: pageId → PagePushState
   const [pagePushStates, setPagePushStates] = useState<Map<string, PagePushState>>(new Map());
 
@@ -127,12 +148,13 @@ export default function Step4Deploy({
   const assetBytes = displayResult.assetFiles.reduce((sum, f) => sum + f.size, 0);
   const phpBytes =
     (displayResult.styleCss.length +
+      displayResult.pageCss.length +
       displayResult.indexPhp.length +
       displayResult.headerPhp.length +
       displayResult.footerPhp.length +
       displayResult.functionsPhp.length) * 2;
   const totalKb = ((assetBytes + phpBytes) / 1024).toFixed(1);
-  const totalFiles = displayResult.assetFiles.length + 6;
+  const totalFiles = displayResult.assetFiles.length + 8;
 
   // How many pages are fully pushed
   const pushedCount = pages.filter((p) => getPagePush(p.id).status === "done").length;
@@ -175,7 +197,8 @@ export default function Step4Deploy({
       wpConnection,
       themeConfig,
       result,
-      (msg) => updatePagePush(page.id, { progress: msg })
+      (msg) => updatePagePush(page.id, { progress: msg }),
+      page.htmlFileName
     );
 
     if (pushResult.success) {
@@ -219,6 +242,91 @@ export default function Step4Deploy({
 
   function handleCancelPushAll() {
     pushAllAbort.current = true;
+  }
+
+  async function handleListThemes() {
+    setThemesStatus("loading");
+    setThemes([]);
+    setSelectedTheme(null);
+    const res = await fetchWpThemes(wpConnection);
+    if (res.success && res.themes) {
+      setThemes(res.themes);
+      setThemesStatus("done");
+      // Auto-select active theme
+      const active = res.themes.find((t) => t.status === "active");
+      if (active) setSelectedTheme(active.stylesheet);
+    } else {
+      setThemesStatus("error");
+    }
+  }
+
+  async function handleDeployTemplate() {
+    if (!activeConversionResult) return;
+    setTemplateStatus("loading");
+    setTemplateResult(null);
+    setTemplateProgress(null);
+    const res = await pushAsElementorTemplate(
+      wpConnection,
+      themeConfig,
+      activeConversionResult,
+      (msg) => setTemplateProgress(msg),
+      activePage?.htmlFileName
+    );
+    setTemplateStatus(res.success ? "done" : "error");
+    setTemplateResult(res);
+    setTemplateProgress(null);
+    if (res.success) setShowPushConfetti(true);
+  }
+
+  async function handleCheckHelper() {
+    setCheckingHelper(true);
+    const active = await checkHelperPlugin(wpConnection);
+    setHelperPluginActive(active);
+    setCheckingHelper(false);
+  }
+
+  function readCustomStyleFile(file: File) {
+    const reader = new FileReader();
+    reader.onload = (e) => setCustomStyleCss(e.target?.result as string ?? null);
+    reader.readAsText(file);
+  }
+
+  function handleCustomStyleDrop(e: React.DragEvent) {
+    e.preventDefault();
+    setCustomStyleDragging(false);
+    const file = e.dataTransfer.files[0];
+    if (file) readCustomStyleFile(file);
+  }
+
+  function handleCustomStylePick(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (file) readCustomStyleFile(file);
+  }
+
+  async function handleDeployChildTheme() {
+    if (!selectedTheme || !activeConversionResult) return;
+    setChildThemeStatus("loading");
+    setChildThemeResult(null);
+    setChildThemeProgress(null);
+
+    const cssFiles = activeConversionResult.assetFiles.filter((f) => f.type === "css");
+    const jsFiles  = activeConversionResult.assetFiles.filter((f) => f.type === "js");
+    const imgFiles = activeConversionResult.assetFiles.filter((f) => f.type === "image");
+
+    const res = await deployChildTheme(
+      wpConnection,
+      selectedTheme,
+      cssFiles,
+      jsFiles,
+      imgFiles,
+      customStyleCss ?? undefined,
+      (msg) => setChildThemeProgress(msg)
+    );
+
+    setChildThemeStatus(res.success ? "done" : "error");
+    setChildThemeResult(res);
+    setChildThemeProgress(null);
+    if (res.success) setShowPushConfetti(true);
   }
 
   return (
@@ -306,8 +414,10 @@ export default function Step4Deploy({
               <div>
                 <CardTitle className="text-base">Download Theme ZIP</CardTitle>
                 <CardDescription className="mt-1">
-                  Download the complete WordPress theme package. Install via
-                  WordPress Admin → Appearance → Themes → Upload Theme.
+                  Download the complete package. Import{" "}
+                  <code className="text-xs bg-muted px-1 rounded">elementor-template.json</code>{" "}
+                  via Elementor → Templates → Import Template, or install the
+                  ZIP as a theme via Appearance → Themes.
                 </CardDescription>
               </div>
             </div>
@@ -344,12 +454,14 @@ export default function Step4Deploy({
           )}
           <pre className="text-xs font-mono text-muted-foreground bg-muted rounded-md px-4 py-3 leading-6">
 {`${themeConfig.themeSlug}/
+├── elementor-template.json  ← import via Elementor → Templates
+├── HOW-TO-IMPORT.txt
 ├── style.css
 ├── index.php
 ├── header.php
 ├── footer.php
 ├── functions.php
-├── elementor-template.json
+├── elementor-page.css
 └── assets/
     ├── css/     (${cssCount} ${cssCount === 1 ? "file" : "files"})
     ├── js/      (${jsCount} ${jsCount === 1 ? "file" : "files"})
@@ -372,8 +484,8 @@ export default function Step4Deploy({
                 <CardTitle className="text-base">Push to WordPress</CardTitle>
                 <CardDescription>
                   {pages.length > 1
-                    ? `Push "${activePage?.htmlFileName ?? "active page"}" as a draft page in WordPress with the Elementor layout pre-loaded.`
-                    : "Create a new draft page in your WordPress site with the Elementor layout pre-loaded and ready to edit."
+                    ? `Push "${activePage?.htmlFileName ?? "active page"}" as a draft page in WordPress with the Elementor layout pre-loaded and CSS saved through both Elementor meta and WordPress Additional CSS.`
+                    : "Create a new draft page in your WordPress site with the Elementor layout pre-loaded and CSS saved through both Elementor meta and WordPress Additional CSS."
                   }
                 </CardDescription>
                 <Badge
@@ -443,18 +555,24 @@ export default function Step4Deploy({
                   <ExternalLink className="w-3 h-3 shrink-0" />
                 </a>
               )}
-              {activePush.result.editUrl && (
-                <Button size="sm" asChild>
-                  <a
-                    href={activePush.result.editUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                  >
-                    <ExternalLink className="w-3 h-3 mr-2" />
-                    Edit in Elementor
-                  </a>
-                </Button>
-              )}
+              <div className="flex flex-wrap gap-2">
+                {activePush.result.editUrl && (
+                  <Button size="sm" asChild>
+                    <a href={activePush.result.editUrl} target="_blank" rel="noopener noreferrer">
+                      <ExternalLink className="w-3 h-3 mr-2" />
+                      Edit in Elementor
+                    </a>
+                  </Button>
+                )}
+                {activePush.result.templateLibraryUrl && (
+                  <Button size="sm" variant="outline" asChild>
+                    <a href={activePush.result.templateLibraryUrl} target="_blank" rel="noopener noreferrer">
+                      <ExternalLink className="w-3 h-3 mr-2" />
+                      {activePush.result.templateId ? "View Template in Library" : "Elementor Library"}
+                    </a>
+                  </Button>
+                )}
+              </div>
             </div>
             {activePush.result.warning && (
               <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
@@ -494,7 +612,340 @@ export default function Step4Deploy({
         )}
       </Card>
 
-      {/* ── Card 3: Next steps ── */}
+      {/* ── Card 2b: Deploy as Elementor Template ── */}
+      <Card className="relative overflow-hidden">
+        <CardHeader>
+          <div className="flex items-start justify-between gap-4">
+            <div className="flex items-start gap-3">
+              <UploadCloud className="w-6 h-6 text-muted-foreground mt-0.5 shrink-0" />
+              <div className="space-y-1">
+                <CardTitle className="text-base">Deploy as Elementor Template</CardTitle>
+                <CardDescription>
+                  Save the layout to your WordPress Elementor template library instead of a page. No LiteSpeed CSS stripping — CSS is embedded in the template.
+                </CardDescription>
+              </div>
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {/* Step 1: List theme directories */}
+          <div className="space-y-2">
+            <p className="text-xs font-medium text-muted-foreground">Step 1 — Select a theme directory</p>
+            <div className="flex items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleListThemes}
+                disabled={themesStatus === "loading"}
+              >
+                {themesStatus === "loading" ? (
+                  <><Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />Loading...</>
+                ) : (
+                  "List Theme Directories"
+                )}
+              </Button>
+              {themesStatus === "error" && (
+                <span className="text-xs text-red-500">Failed to fetch themes</span>
+              )}
+            </div>
+
+            {themes.length > 0 && (
+              <div className="flex flex-wrap gap-2 pt-1">
+                {themes.map((theme) => (
+                  <button
+                    key={theme.stylesheet}
+                    onClick={() => setSelectedTheme(theme.stylesheet)}
+                    className={`flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs font-mono transition-colors ${
+                      selectedTheme === theme.stylesheet
+                        ? "border-primary bg-primary/5 text-primary font-semibold"
+                        : "border-muted hover:border-muted-foreground/40 text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    {theme.stylesheet}
+                    {theme.status === "active" && (
+                      <Badge variant="outline" className="text-[10px] px-1 py-0 h-4 text-green-600 border-green-300">active</Badge>
+                    )}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Step 2: Deploy */}
+          {themes.length > 0 && (
+            <div className="space-y-2 border-t pt-4">
+              <p className="text-xs font-medium text-muted-foreground">
+                Step 2 — Upload template
+                {selectedTheme && <span className="text-foreground"> to <span className="font-mono">{selectedTheme}</span></span>}
+              </p>
+              <Button
+                onClick={handleDeployTemplate}
+                disabled={
+                  !selectedTheme ||
+                  !activeConversionResult ||
+                  templateStatus === "loading" ||
+                  templateStatus === "done"
+                }
+              >
+                {templateStatus === "loading" ? (
+                  <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Deploying...</>
+                ) : templateStatus === "done" ? (
+                  <><CheckCircle className="w-4 h-4 mr-2" />Deployed!</>
+                ) : (
+                  <><UploadCloud className="w-4 h-4 mr-2" />Deploy as Template</>
+                )}
+              </Button>
+
+              {templateStatus === "loading" && templateProgress && (
+                <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <Loader2 className="w-3 h-3 animate-spin shrink-0" />
+                  {templateProgress}
+                </div>
+              )}
+
+              {templateStatus === "done" && templateResult && (
+                <div className="rounded-md border border-green-200 bg-green-50 p-4 space-y-2">
+                  <div className="flex items-center gap-2">
+                    <CheckCircle className="w-4 h-4 text-green-600" />
+                    <p className="text-sm font-medium text-green-800">Template saved to Elementor library!</p>
+                  </div>
+                  {templateResult.editUrl && (
+                    <Button size="sm" asChild>
+                      <a href={templateResult.editUrl} target="_blank" rel="noopener noreferrer">
+                        <ExternalLink className="w-3 h-3 mr-2" />
+                        View in Elementor Library
+                      </a>
+                    </Button>
+                  )}
+                  {templateResult.warning && (
+                    <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1">
+                      {templateResult.warning}
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {templateStatus === "error" && templateResult?.error && (
+                <Alert variant="destructive">
+                  <XCircle className="h-4 w-4" />
+                  <AlertDescription>{templateResult.error}</AlertDescription>
+                </Alert>
+              )}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* ── Card 3: Deploy to Child Theme ── */}
+      <Card className="relative overflow-hidden">
+        <CardHeader>
+          <div className="flex items-start gap-3">
+            <UploadCloud className="w-6 h-6 text-muted-foreground mt-0.5 shrink-0" />
+            <div className="space-y-1">
+              <CardTitle className="text-base">Deploy to Child Theme</CardTitle>
+              <CardDescription>
+                Upload CSS/JS files directly into your child theme folder and auto-update{" "}
+                <code className="text-xs bg-muted px-1 rounded">functions.php</code>.
+                Requires a one-time helper plugin install.
+              </CardDescription>
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-5">
+
+          {/* ── Step 1: Helper plugin ── */}
+          <div className="space-y-2">
+            <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Step 1 — Install helper plugin (one time)</p>
+            <p className="text-xs text-muted-foreground">
+              Download this small plugin and install it in WordPress (Plugins → Add New → Upload). It adds a secure REST endpoint so this tool can write files to your theme folder. Delete it when done.
+            </p>
+            <div className="flex items-center gap-3 flex-wrap">
+              <Button variant="outline" size="sm" onClick={() => downloadHelperPluginZip()}>
+                <Download className="w-3.5 h-3.5 mr-1.5" />
+                Download ctw-file-helper.zip
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleCheckHelper}
+                disabled={checkingHelper}
+              >
+                {checkingHelper ? (
+                  <><Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />Checking...</>
+                ) : (
+                  "Check if installed"
+                )}
+              </Button>
+              {helperPluginActive === true && (
+                <span className="flex items-center gap-1 text-xs text-green-600 font-medium">
+                  <CheckCircle className="w-3.5 h-3.5" /> Plugin active
+                </span>
+              )}
+              {helperPluginActive === false && (
+                <span className="flex items-center gap-1 text-xs text-red-500">
+                  <XCircle className="w-3.5 h-3.5" /> Not detected — install &amp; activate it first
+                </span>
+              )}
+            </div>
+          </div>
+
+          {/* ── Step 2: Theme picker ── */}
+          <div className="space-y-2 border-t pt-4">
+            <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Step 2 — Select child theme</p>
+            <div className="flex items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleListThemes}
+                disabled={themesStatus === "loading"}
+              >
+                {themesStatus === "loading" ? (
+                  <><Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />Loading...</>
+                ) : (
+                  "List Themes"
+                )}
+              </Button>
+              {themesStatus === "error" && (
+                <span className="text-xs text-red-500">Failed to fetch themes</span>
+              )}
+            </div>
+            {themes.length > 0 && (
+              <div className="flex flex-wrap gap-2 pt-1">
+                {themes.map((theme) => (
+                  <button
+                    key={theme.stylesheet}
+                    onClick={() => setSelectedTheme(theme.stylesheet)}
+                    className={`flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs font-mono transition-colors ${
+                      selectedTheme === theme.stylesheet
+                        ? "border-primary bg-primary/5 text-primary font-semibold"
+                        : "border-muted hover:border-muted-foreground/40 text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    {theme.stylesheet}
+                    {theme.status === "active" && (
+                      <Badge variant="outline" className="text-[10px] px-1 py-0 h-4 text-green-600 border-green-300">active</Badge>
+                    )}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* ── Step 2b: Custom style.css ── */}
+          <div className="space-y-2 border-t pt-4">
+            <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Step 2b — Custom style.css <span className="normal-case font-normal text-muted-foreground">(optional)</span></p>
+            <p className="text-xs text-muted-foreground">Drop your custom <code className="bg-muted px-1 rounded">style.css</code> here to overwrite the theme root <code className="bg-muted px-1 rounded">style.css</code> on deploy.</p>
+            <div
+              onDragOver={(e) => { e.preventDefault(); setCustomStyleDragging(true); }}
+              onDragLeave={() => setCustomStyleDragging(false)}
+              onDrop={handleCustomStyleDrop}
+              onClick={() => customStyleInputRef.current?.click()}
+              className={`cursor-pointer rounded-md border-2 border-dashed px-4 py-5 text-center transition-colors ${
+                customStyleDragging
+                  ? "border-primary bg-primary/5"
+                  : customStyleCss
+                  ? "border-green-400 bg-green-50"
+                  : "border-muted-foreground/25 hover:border-muted-foreground/50"
+              }`}
+            >
+              <input
+                ref={customStyleInputRef}
+                type="file"
+                accept=".css,text/css"
+                className="hidden"
+                onChange={handleCustomStylePick}
+              />
+              {customStyleCss ? (
+                <div className="flex items-center justify-center gap-2 text-xs text-green-700">
+                  <CheckCircle className="w-4 h-4" />
+                  <span>style.css loaded ({(customStyleCss.length / 1024).toFixed(1)} KB)</span>
+                  <button
+                    onClick={(e) => { e.stopPropagation(); setCustomStyleCss(null); }}
+                    className="ml-2 text-muted-foreground hover:text-destructive"
+                  >
+                    ✕
+                  </button>
+                </div>
+              ) : (
+                <p className="text-xs text-muted-foreground">
+                  Drop <span className="font-mono">style.css</span> here or click to browse
+                </p>
+              )}
+            </div>
+          </div>
+
+          {/* ── Step 3: Deploy ── */}
+          {themes.length > 0 && (
+            <div className="space-y-2 border-t pt-4">
+              <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
+                Step 3 — Deploy
+                {selectedTheme && <span className="text-foreground normal-case font-normal"> to <span className="font-mono">{selectedTheme}</span></span>}
+              </p>
+              <Button
+                onClick={handleDeployChildTheme}
+                disabled={
+                  !selectedTheme ||
+                  !activeConversionResult ||
+                  helperPluginActive !== true ||
+                  childThemeStatus === "loading" ||
+                  childThemeStatus === "done"
+                }
+              >
+                {childThemeStatus === "loading" ? (
+                  <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Deploying...</>
+                ) : childThemeStatus === "done" ? (
+                  <><CheckCircle className="w-4 h-4 mr-2" />Deployed!</>
+                ) : (
+                  <><UploadCloud className="w-4 h-4 mr-2" />Deploy to Child Theme</>
+                )}
+              </Button>
+              {helperPluginActive !== true && childThemeStatus === "idle" && (
+                <p className="text-xs text-muted-foreground">Install &amp; verify the helper plugin first.</p>
+              )}
+
+              {childThemeStatus === "loading" && childThemeProgress && (
+                <div className="flex items-center gap-2 text-xs text-muted-foreground pt-1">
+                  <Loader2 className="w-3 h-3 animate-spin shrink-0" />
+                  {childThemeProgress}
+                </div>
+              )}
+
+              {childThemeStatus === "done" && childThemeResult && (
+                <div className="rounded-md border border-green-200 bg-green-50 p-4 space-y-2">
+                  <div className="flex items-center gap-2">
+                    <CheckCircle className="w-4 h-4 text-green-600" />
+                    <p className="text-sm font-medium text-green-800">Child theme updated!</p>
+                  </div>
+                  {childThemeResult.uploaded.length > 0 && (
+                    <p className="text-xs text-green-700">
+                      Uploaded: {childThemeResult.uploaded.join(", ")}
+                    </p>
+                  )}
+                  {childThemeResult.skipped.length > 0 && (
+                    <p className="text-xs text-muted-foreground">
+                      Skipped (already exist): {childThemeResult.skipped.join(", ")}
+                    </p>
+                  )}
+                  {childThemeResult.warning && (
+                    <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1">
+                      {childThemeResult.warning}
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {childThemeStatus === "error" && childThemeResult?.error && (
+                <Alert variant="destructive">
+                  <XCircle className="h-4 w-4" />
+                  <AlertDescription>{childThemeResult.error}</AlertDescription>
+                </Alert>
+              )}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* ── Card 4: Next steps ── */}
       <Card>
         <CardHeader>
           <CardTitle className="text-base text-muted-foreground">
@@ -504,10 +955,10 @@ export default function Step4Deploy({
         <CardContent>
           <ol className="space-y-2 text-sm text-muted-foreground list-none">
             {[
-              "Upload the ZIP via Appearance → Themes → Upload Theme",
-              "Activate the theme",
-              "Open the page in Elementor editor",
-              "Replace HTML widgets with native Elementor widgets",
+              "Go to Elementor → Templates → Saved Templates → Import Templates",
+              "Select elementor-template.json from the downloaded ZIP",
+              "Create a new page, open it in Elementor, click the folder icon → My Templates → Insert",
+              "All headings, text, images, and buttons are already native Elementor widgets — edit freely",
               "Publish when ready",
             ].map((step, i) => (
               <li key={i} className="flex items-start gap-3">
@@ -537,3 +988,4 @@ export default function Step4Deploy({
     </div>
   );
 }
+

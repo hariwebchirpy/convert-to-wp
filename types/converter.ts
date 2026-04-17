@@ -56,6 +56,7 @@ export interface ConversionResult {
   indexPhp: string;
   functionsPhp: string;
   styleCss: string;
+  pageCss: string;
   elementorJson: string;
   rawHtml: string;       // plain HTML body content for WP REST push
   assetFiles: UploadedFile[];
@@ -67,6 +68,24 @@ export interface PushResult {
   pageId?: number;
   pageUrl?: string;
   editUrl?: string;
+  templateId?: number;
+  templateLibraryUrl?: string;
+  error?: string;
+  warning?: string;
+}
+
+export interface TemplateResult {
+  success: boolean;
+  templateId?: number;
+  editUrl?: string;
+  error?: string;
+  warning?: string;
+}
+
+export interface ChildThemeDeployResult {
+  success: boolean;
+  uploaded: string[];
+  skipped: string[];
   error?: string;
   warning?: string;
 }

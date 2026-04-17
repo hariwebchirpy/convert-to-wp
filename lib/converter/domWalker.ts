@@ -6,7 +6,9 @@ import { buildButtonWidget, isButton } from "./widgets/buttonWidget";
 import { buildVideoWidget, isVideo } from "./widgets/videoWidget";
 import { buildDividerWidget, isDivider } from "./widgets/dividerWidget";
 import { buildIconBoxWidget, isIconBox } from "./widgets/iconBoxWidget";
+import { buildSpacerWidget, isSpacer } from "./widgets/spacerWidget";
 import { detectColumns } from "./widgets/columnDetector";
+import { parseStyle, extractBgColor } from "./widgets/styleParser";
 
 import {
   ElementorWidget,
@@ -28,17 +30,14 @@ export interface WalkerResult {
   widgetMap: WidgetMapItem[];
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// ── Transparent wrapper patterns ──────────────────────────────────────────────
 
-// Bootstrap/layout wrapper class patterns — these are transparent containers,
-// we recurse straight through them instead of treating them as content.
 const WRAPPER_CLASS_PATTERNS = [
   /\bcontainer(-fluid)?\b/,
   /\brow\b/,
   /\bcol(-[a-z]{2})?(-\d+)?\b/,
   /\bwrap(per)?\b/,
   /\binner\b/,
-  /\bbox\b/,
 ];
 
 function isTransparentWrapper(el: Element): boolean {
@@ -50,38 +49,32 @@ function isTransparentWrapper(el: Element): boolean {
 const SKIP_TAGS = new Set(["script", "style", "link", "meta", "noscript", "br", "hr"]);
 
 // ── Atomic block detection ────────────────────────────────────────────────────
-// Elements that should be emitted as a single HTML widget rather than recursed into.
-// Carousels, sliders, absolute-positioned decorative layouts, marquees etc.
+// Elements that MUST be preserved as a single HTML widget because they rely on
+// JavaScript initialization (carousels, sliders) or absolute-positioned layouts.
 
 const ATOMIC_CLASS_PATTERNS = [
-  /\bowl-carousel\b/,       // Owl Carousel
-  /\bslick-slider\b/,       // Slick Slider
-  /\bswiper\b/,             // Swiper
-  /\bcarousel\b/,           // Bootstrap Carousel / generic
-  /\bslider\b/,             // generic slider
-  /\bmarquee\b/,            // marquee / ticker
-  /\bantigravity\b/,        // wave / antigravity list
-  /\btraveler-section\b/,   // radial pill layout in Tripsil
-  /\bpill-wrapper\b/,       // individual pills (position:absolute)
+  /\bowl-carousel\b/,
+  /\bslick-slider\b/,
+  /\bswiper\b/,
+  /\bcarousel\b/,
+  /\bslider\b/,
+  /\bmarquee\b/,
+  /\bantigravity\b/,
+  /\btraveler-section\b/,
+  /\bpill-wrapper\b/,
 ];
 
-const ATOMIC_ID_PATTERNS = [
-  /^owl-/,                  // id="owl-features", id="owl-plan" etc.
-];
+const ATOMIC_ID_PATTERNS = [/^owl-/];
 
 function isAtomicBlock(el: Element): boolean {
   const cls = (el as HTMLElement).className ?? "";
-  const id  = el.id ?? "";
+  const id = el.id ?? "";
   return (
     ATOMIC_CLASS_PATTERNS.some((re) => re.test(cls)) ||
     ATOMIC_ID_PATTERNS.some((re) => re.test(id))
   );
 }
 
-// A section whose children are mostly position:absolute (decorative layout).
-// If > 50% of block children have position:absolute in their inline style or
-// a class that implies it (emoji, pill-wrapper, center-card), treat the whole
-// thing as atomic.
 function isDecorativeSection(el: Element): boolean {
   const DECORATIVE_CLASS = /\bemoji\b|\bpill-wrapper\b|\bcenter-card\b|\bposition-absolute\b/;
   const children = Array.from(el.children);
@@ -89,7 +82,11 @@ function isDecorativeSection(el: Element): boolean {
   const decorativeCount = children.filter((c) => {
     const cls = (c as HTMLElement).className ?? "";
     const style = c.getAttribute("style") ?? "";
-    return DECORATIVE_CLASS.test(cls) || style.includes("position: absolute") || style.includes("position:absolute");
+    return (
+      DECORATIVE_CLASS.test(cls) ||
+      style.includes("position: absolute") ||
+      style.includes("position:absolute")
+    );
   }).length;
   return decorativeCount / children.length > 0.4;
 }
@@ -104,14 +101,21 @@ export function walkSections(
   const widgetMap: WidgetMapItem[] = [];
 
   for (const section of sections) {
-    const doc = new DOMParser().parseFromString(section.html, "text/html");
-    const root = doc.body.firstElementChild ?? doc.body;
+    // Option 1: preserve original Bootstrap HTML as-is inside a single html widget.
+    // This avoids Elementor remapping Bootstrap grid classes to its own grid system.
+    const htmlWidget = buildHtmlWidget(section.html);
+    const sectionSettings: Record<string, unknown> = {
+      layout: "full_width",
+      gap: "default",
+      custom_id: section.id,
+    };
 
-    // Skip layout wrappers at the root level of each section
-    const effectiveRoot = drillToContent(root);
-    const widgets = walkChildren(effectiveRoot, uploadedFiles, 0);
-    const elSection = buildElementorSection(section.id, widgets);
-    const mapItem = buildWidgetMapItem(section, widgets);
+    const elSection = buildElementorSection(section.id, [htmlWidget], sectionSettings);
+    const mapItem: WidgetMapItem = {
+      sectionId: section.id,
+      sectionLabel: section.id,
+      widgets: [{ type: "HTML", label: section.id, tag: "div", isComplex: true }],
+    };
 
     resultSections.push(elSection);
     widgetMap.push(mapItem);
@@ -120,22 +124,18 @@ export function walkSections(
   return { sections: resultSections, widgetMap };
 }
 
-// Drill past transparent wrapper layers (container > row) to reach real content
+// Drill past transparent wrapper layers to reach real content
 function drillToContent(el: Element): Element {
   let current = el;
-  // Max 4 layers of drilling
   for (let i = 0; i < 4; i++) {
     const children = Array.from(current.children).filter(
       (c) => !SKIP_TAGS.has(c.tagName.toLowerCase())
     );
-    // If only one child and it's a transparent wrapper, step into it
     if (children.length === 1 && isTransparentWrapper(children[0])) {
       current = children[0];
       continue;
     }
-    // If all children are column/row wrappers, step into the first meaningful layer
     if (children.length > 0 && children.every((c) => isTransparentWrapper(c))) {
-      // This is a "row" — treat children as columns, stop drilling
       break;
     }
     break;
@@ -145,7 +145,6 @@ function drillToContent(el: Element): Element {
 
 // ── walkChildren ──────────────────────────────────────────────────────────────
 
-// Increased from 4 to 8 to handle Bootstrap's deep nesting
 const MAX_DEPTH = 8;
 
 function walkChildren(
@@ -154,7 +153,9 @@ function walkChildren(
   depth: number
 ): ElementorWidget[] {
   if (depth > MAX_DEPTH) {
-    return [buildHtmlWidget((element as HTMLElement).outerHTML)];
+    const text = element.textContent?.trim() ?? "";
+    if (text) return [buildHtmlWidget((element as HTMLElement).outerHTML)];
+    return [];
   }
 
   const children = Array.from(element.children).filter(
@@ -163,19 +164,15 @@ function walkChildren(
 
   if (children.length === 0) {
     const text = element.textContent?.trim() ?? "";
-    if (text) {
-      return [buildHtmlWidget((element as HTMLElement).outerHTML)];
-    }
+    if (text) return [buildHtmlWidget((element as HTMLElement).outerHTML)];
     return [];
   }
 
   const widgets: ElementorWidget[] = [];
-
   for (const child of children) {
     const widget = mapElement(child, uploadedFiles, depth);
     if (widget) widgets.push(widget);
   }
-
   return widgets;
 }
 
@@ -187,63 +184,64 @@ function mapElement(
   depth: number
 ): ElementorWidget | null {
   const tag = element.tagName.toLowerCase();
-
   if (SKIP_TAGS.has(tag)) return null;
 
-  // Skip truly empty elements
+  // Skip truly empty elements (no text, no children, no src)
   const hasText = (element.textContent?.trim().length ?? 0) > 0;
   const hasChildren = element.children.length > 0;
   const hasSrc = element.hasAttribute("src");
   if (!hasText && !hasChildren && !hasSrc) return null;
 
-  // ── Atomic blocks — emit as single HTML widget, never recurse ────────────
-  // Carousels, sliders, marquees, radial/absolute-positioned decorative layouts.
-
+  // ── Must-preserve as HTML (JS-dependent or absolute-positioned decorative) ──
   if (isAtomicBlock(element) || isDecorativeSection(element)) {
     return buildHtmlWidget((element as HTMLElement).outerHTML);
   }
 
-  // ── Priority widget detection ─────────────────────────────────────────────
+  // ── Spacer (empty height div) ─────────────────────────────────────────────
+  if (isSpacer(element)) {
+    const style = parseStyle(element.getAttribute("style") ?? "");
+    const h = style["height"] ?? "50px";
+    const m = h.match(/^([\d.]+)/);
+    return buildSpacerWidget(m ? Math.round(parseFloat(m[1])) : 50);
+  }
 
-  if (isHeading(element))     return buildHeadingWidget(element);
-  if (isImage(element))       return buildImageWidget(element, uploadedFiles);
-  if (isVideo(element))       return buildVideoWidget(element);
-  if (isDivider(element))     return buildDividerWidget(element);
-  if (isButton(element))      return buildButtonWidget(element);
+  // ── Native widget priority detection ──────────────────────────────────────
+  // These always win, even if the element has custom classes or inline styles.
+  // Style extraction is now handled INSIDE each widget builder.
+
+  if (isHeading(element)) return buildHeadingWidget(element);
+  if (isImage(element))   return buildImageWidget(element, uploadedFiles);
+  if (isVideo(element))   return buildVideoWidget(element);
+  if (isDivider(element)) return buildDividerWidget(element);
+  if (isIconBox(element)) return buildIconBoxWidget(element);
+  if (isButton(element))  return buildButtonWidget(element);
   if (isTextElement(element)) return buildTextWidget(element);
-  if (isIconBox(element))     return buildIconBoxWidget(element);
 
-  // ── Transparent wrapper — drill through without consuming a depth level ──
-
+  // ── Transparent wrapper — drill through ──────────────────────────────────
   if (isTransparentWrapper(element)) {
     const drilled = drillToContent(element);
-    // After drilling, check for column layout
     const layout = detectColumns(drilled);
     if (layout.isMultiColumn) {
       return buildInnerSection(layout.columns, uploadedFiles) as unknown as ElementorWidget;
     }
-    // Otherwise recurse at same depth (wrapper doesn't count)
     const childWidgets = walkChildren(drilled, uploadedFiles, depth);
     if (childWidgets.length === 0) return null;
     if (childWidgets.length === 1) return childWidgets[0];
-    // Multiple widgets from a wrapper — wrap in HTML at deeper depths, flatten at 0
-    if (depth === 0) return null; // caller loop handles them via walkChildren directly
+    if (depth === 0) return null;
+    // Wrap multi-widget wrapper content in an HTML widget only as last resort
     return buildHtmlWidget((element as HTMLElement).outerHTML);
   }
 
-  // ── Column detection ──────────────────────────────────────────────────────
-
+  // ── Column layout detection ───────────────────────────────────────────────
   const layout = detectColumns(element);
   if (layout.isMultiColumn) {
     return buildInnerSection(layout.columns, uploadedFiles) as unknown as ElementorWidget;
   }
 
-  // ── Recursive fallback ────────────────────────────────────────────────────
-
+  // ── Recursive walk — try to extract native widgets from children ──────────
   const childWidgets = walkChildren(element, uploadedFiles, depth + 1);
 
   if (childWidgets.length === 0) {
-    // Only emit HTML widget if there's visible text content
     const text = element.textContent?.trim() ?? "";
     if (text.length > 0) return buildHtmlWidget((element as HTMLElement).outerHTML);
     return null;
@@ -251,6 +249,9 @@ function mapElement(
 
   if (childWidgets.length === 1) return childWidgets[0];
 
+  // Multiple widgets found inside — emit them individually (caller handles flattening).
+  // At depth 0 the caller loop takes care of it; deeper we need a container.
+  if (depth === 0) return null; // signals walkChildren to loop over children directly
   return buildHtmlWidget((element as HTMLElement).outerHTML);
 }
 
@@ -266,8 +267,7 @@ function buildInnerSection(
 
   const columns: ElementorColumn[] = columnEls.map((col, i) => {
     const size = i === count - 1 ? baseSize + remainder : baseSize;
-    // Drill into column wrapper before walking its children
-    // but if the column itself is atomic (e.g. carousel inside a col), preserve it whole
+
     if (isAtomicBlock(col)) {
       return {
         id: randomId(),
@@ -276,19 +276,35 @@ function buildInnerSection(
         elements: [buildHtmlWidget((col as HTMLElement).outerHTML)],
       };
     }
+
     const effectiveCol = drillToContent(col);
     let widgets = walkChildren(effectiveCol, uploadedFiles, 1);
+
+    // If children returned nothing useful, try the column element itself as a widget
     if (widgets.length === 0) {
-      // Only emit HTML fallback if there's actual content
+      const w = mapElement(col, uploadedFiles, 1);
+      if (w) widgets = [w];
+    }
+
+    if (widgets.length === 0) {
       const text = col.textContent?.trim() ?? "";
       if (text.length > 0) {
         widgets = [buildHtmlWidget((col as HTMLElement).outerHTML)];
       }
     }
+
+    // Extract column background if any
+    const colBg = extractBgColor(col);
+    const colSettings: Record<string, unknown> = { _column_size: size };
+    if (colBg) {
+      colSettings["background_background"] = "classic";
+      colSettings["background_color"] = colBg;
+    }
+
     return {
       id: randomId(),
       elType: "column",
-      settings: { _column_size: size },
+      settings: colSettings as { _column_size: number },
       elements: widgets,
     };
   });
@@ -298,7 +314,7 @@ function buildInnerSection(
     elType: "section",
     isInner: true,
     settings: {
-      layout: "boxed",
+      layout: "full_width",
       gap: "default",
       is_inner: true,
     },
@@ -310,15 +326,17 @@ function buildInnerSection(
 
 function buildElementorSection(
   sectionId: string,
-  widgets: ElementorWidget[]
+  widgets: ElementorWidget[],
+  extraSettings: Record<string, unknown> = {}
 ): ElementorSection {
   return {
     id: randomId(),
     elType: "section",
     settings: {
-      layout: "boxed",
+      layout: "full_width",
       gap: "default",
       custom_id: sectionId,
+      ...extraSettings,
     },
     elements: [
       {
@@ -365,7 +383,7 @@ function widgetToMapNode(
     case "heading":
       return {
         type: "Heading",
-        label: truncate(String(s.title ?? ""), 40),
+        label: truncate(stripHtml(String(s.title ?? "")), 40),
         tag: String(s.header_size ?? "h2"),
         isComplex: false,
       };
@@ -405,6 +423,8 @@ function widgetToMapNode(
     }
     case "divider":
       return { type: "Divider", label: "---", tag: "hr", isComplex: false };
+    case "spacer":
+      return { type: "Spacer", label: `${(s.space as { size?: number })?.size ?? 50}px`, tag: "div", isComplex: false };
     case "icon-box":
       return {
         type: "Icon Box",
@@ -415,11 +435,10 @@ function widgetToMapNode(
     case "html":
     default: {
       const htmlStr = String(s.html ?? "");
-      // Give a meaningful label for known atomic blocks
       let htmlLabel = truncate(stripHtml(htmlStr), 40);
-      if (/owl-carousel|slick-slider|swiper/i.test(htmlStr)) htmlLabel = "🎠 Carousel (preserved as HTML)";
-      else if (/marquee|antigravity/i.test(htmlStr))          htmlLabel = "📜 Marquee (preserved as HTML)";
-      else if (/traveler-section|pill-wrapper/i.test(htmlStr)) htmlLabel = "🎯 Decorative layout (preserved as HTML)";
+      if (/owl-carousel|slick-slider|swiper/i.test(htmlStr)) htmlLabel = "Carousel (JS — preserved as HTML)";
+      else if (/marquee|antigravity/i.test(htmlStr)) htmlLabel = "Marquee (JS — preserved as HTML)";
+      else if (/traveler-section|pill-wrapper/i.test(htmlStr)) htmlLabel = "Decorative layout (preserved as HTML)";
       return {
         type: "HTML",
         label: htmlLabel,

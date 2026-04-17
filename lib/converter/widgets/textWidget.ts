@@ -1,12 +1,26 @@
 import { ElementorWidget, randomId } from "@/types/converter";
+import {
+  extractTypography,
+  extractAlignment,
+  buildTypographySettings,
+} from "./styleParser";
 
 export function buildTextWidget(element: Element): ElementorWidget {
+  const typo = extractTypography(element);
+  const align = extractAlignment(element);
+
+  // Use innerHTML so inline formatting (strong, em, a, span) is preserved
+  const editor = element.innerHTML.trim();
+
   return {
     id: randomId(),
     elType: "widget",
     widgetType: "text-editor",
     settings: {
-      editor: element.outerHTML,
+      editor,
+      align,
+      text_color: typo.color ?? "",
+      ...buildTypographySettings(typo),
     },
     elements: [],
   };

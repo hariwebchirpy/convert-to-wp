@@ -1,22 +1,40 @@
 import { ElementorWidget, randomId } from "@/types/converter";
+import {
+  parseStyle,
+  extractBorderRadius,
+  extractBgColor,
+  extractAlignment,
+} from "./styleParser";
+
+function resolveButtonType(cls: string): string {
+  if (cls.includes("btn-primary") || cls.includes("btn-dark")) return "info";
+  if (cls.includes("btn-outline")) return "outline";
+  if (cls.includes("btn-success")) return "success";
+  if (cls.includes("btn-danger") || cls.includes("btn-warning")) return "warning";
+  return "default";
+}
+
+function resolveButtonSize(cls: string): string {
+  if (cls.includes("btn-lg") || cls.includes("btn-large")) return "lg";
+  if (cls.includes("btn-sm") || cls.includes("btn-small")) return "sm";
+  return "md";
+}
 
 export function buildButtonWidget(element: Element): ElementorWidget {
   const text = element.textContent?.trim() || "Click here";
   const href = element.getAttribute("href") ?? "#";
   const cls = element.getAttribute("class") ?? "";
+  const style = parseStyle(element.getAttribute("style") ?? "");
 
-  const isExternal =
-    href.startsWith("http") && !href.includes(
-      typeof window !== "undefined" ? window.location.hostname : ""
-    );
-  const target = element.getAttribute("target") === "_blank";
+  const isExternal = href.startsWith("http");
+  const opensNewTab = element.getAttribute("target") === "_blank";
 
-  let buttonType: "info" | "default" | "outline" = "default";
-  if (cls.includes("primary") || cls.includes("btn-primary")) {
-    buttonType = "info";
-  } else if (cls.includes("outline")) {
-    buttonType = "outline";
-  }
+  const btnType = resolveButtonType(cls);
+  const btnSize = resolveButtonSize(cls);
+  const align = extractAlignment(element.parentElement ?? element);
+  const borderRadius = extractBorderRadius(element);
+  const bgColor = extractBgColor(element);
+  const textColor = style["color"];
 
   return {
     id: randomId(),
@@ -26,12 +44,26 @@ export function buildButtonWidget(element: Element): ElementorWidget {
       text,
       link: {
         url: href,
-        is_external: isExternal || target,
+        is_external: isExternal || opensNewTab,
         nofollow: false,
       },
-      button_type: buttonType,
-      align: "left",
-      size: "md",
+      button_type: btnType,
+      size: btnSize,
+      align,
+      ...(bgColor ? { background_color: bgColor } : {}),
+      ...(textColor ? { button_text_color: textColor } : {}),
+      ...(borderRadius !== undefined
+        ? {
+            border_radius: {
+              top: String(borderRadius),
+              right: String(borderRadius),
+              bottom: String(borderRadius),
+              left: String(borderRadius),
+              unit: "px",
+              isLinked: true,
+            },
+          }
+        : {}),
     },
     elements: [],
   };
