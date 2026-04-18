@@ -1,7 +1,7 @@
 "use client";
 
 import { useRef, useState, useCallback, useEffect } from "react";
-import { UploadCloud, X, FileCode, FileText, Image, FileJson, FolderOpen, Loader2, AlertCircle, CheckCircle, Palette } from "lucide-react";
+import { X, FileCode, FileText, Image, FileJson, FolderOpen, Loader2, AlertCircle, CheckCircle, Palette } from "lucide-react";
 import { UploadedFile, ThemeConfig, PageEntry } from "@/types/converter";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -9,6 +9,9 @@ import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+
+const IMAGE_EXTS = new Set([".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp"]);
+const TEXT_EXTS  = new Set([".html", ".css", ".js"]);
 import { cn } from "@/lib/utils";
 
 interface Props {
@@ -86,10 +89,10 @@ function toSlug(name: string): string {
 }
 
 function getFileType(name: string): UploadedFile["type"] {
-  const ext = name.split(".").pop()?.toLowerCase() ?? "";
-  if (ext === "html") return "html";
-  if (ext === "css")  return "css";
-  if (ext === "js")   return "js";
+  const ext = "." + (name.split(".").pop()?.toLowerCase() ?? "");
+  if (ext === ".html") return "html";
+  if (ext === ".css")  return "css";
+  if (ext === ".js")   return "js";
   return "image";
 }
 
@@ -281,10 +284,44 @@ export default function Step2Upload({
   }
 
   // Local import state
-  const [localPath, setLocalPath] = useState("C:\\Users\\HARI_JOHNSON\\Downloads\\_static");
   const [importStatus, setImportStatus] = useState<"idle" | "loading" | "done" | "error">("idle");
   const [importError, setImportError] = useState<string | null>(null);
   const [importCount, setImportCount] = useState<{ html: number; css: number; js: number; image: number } | null>(null);
+  const [pickedDirName, setPickedDirName] = useState<string | null>(null);
+
+  async function collectFiles(
+    dirHandle: FileSystemDirectoryHandle
+  ): Promise<Array<{ name: string; type: UploadedFile["type"]; content: string; size: number }>> {
+    const results: Array<{ name: string; type: UploadedFile["type"]; content: string; size: number }> = [];
+
+    async function walk(handle: FileSystemDirectoryHandle) {
+      for await (const entry of (handle as unknown as AsyncIterable<FileSystemHandle>)) {
+        if (entry.kind === "directory") {
+          await walk(entry as FileSystemDirectoryHandle);
+          continue;
+        }
+        const fileEntry = entry as FileSystemFileHandle;
+        const ext = "." + (fileEntry.name.split(".").pop()?.toLowerCase() ?? "");
+        if (!TEXT_EXTS.has(ext) && !IMAGE_EXTS.has(ext)) continue;
+
+        const file = await fileEntry.getFile();
+        const type = getFileType(fileEntry.name);
+
+        if (IMAGE_EXTS.has(ext)) {
+          const buf = await file.arrayBuffer();
+          const b64 = btoa(String.fromCharCode(...new Uint8Array(buf)));
+          const mime = file.type || "application/octet-stream";
+          results.push({ name: fileEntry.name, type, content: `data:${mime};base64,${b64}`, size: file.size });
+        } else {
+          const text = await file.text();
+          results.push({ name: fileEntry.name, type, content: text, size: file.size });
+        }
+      }
+    }
+
+    await walk(dirHandle);
+    return results;
+  }
 
   // Rebuild pages whenever HTML files change
   useEffect(() => {
@@ -295,30 +332,23 @@ export default function Step2Upload({
   }, [htmlFiles.length]);
 
   async function handleLocalImport() {
+    if (!("showDirectoryPicker" in window)) {
+      setImportStatus("error");
+      setImportError("Your browser doesn't support folder picking. Please use Chrome or Edge.");
+      return;
+    }
+
     setImportStatus("loading");
     setImportError(null);
     setImportCount(null);
 
     try {
-      const res = await fetch("/api/local-import", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ dirPath: localPath }),
-      });
+      const dirHandle = await (window as Window & { showDirectoryPicker: () => Promise<FileSystemDirectoryHandle> }).showDirectoryPicker();
+      setPickedDirName(dirHandle.name);
 
-      const data = await res.json() as {
-        files?: Array<{ name: string; type: "html" | "css" | "js" | "image"; content: string; size: number }>;
-        error?: string;
-      };
-
-      if (!res.ok || data.error) {
-        setImportStatus("error");
-        setImportError(data.error ?? `HTTP ${res.status}`);
-        return;
-      }
-
+      const allFiles = await collectFiles(dirHandle);
       const existingNames = new Set(uploadedFiles.map((f) => f.name));
-      const newFiles: UploadedFile[] = (data.files ?? [])
+      const newFiles: UploadedFile[] = allFiles
         .filter((f) => !existingNames.has(f.name))
         .map((f) => ({
           id: crypto.randomUUID(),
@@ -332,10 +362,14 @@ export default function Step2Upload({
       if (newFiles.length > 0) onAddFiles(newFiles);
 
       const counts = { html: 0, css: 0, js: 0, image: 0 };
-      for (const f of newFiles) counts[f.type]++;
+      for (const f of newFiles) counts[f.type as keyof typeof counts]++;
       setImportCount(counts);
       setImportStatus("done");
     } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") {
+        setImportStatus("idle");
+        return;
+      }
       setImportStatus("error");
       setImportError(err instanceof Error ? err.message : "Unknown error");
     }
@@ -358,34 +392,31 @@ export default function Step2Upload({
             Import from Local Folder
           </CardTitle>
           <CardDescription>
-            Point to your static site folder — all HTML, CSS, JS and images are loaded automatically.
+            Pick your static site folder — all HTML, CSS, JS and images are loaded directly in the browser.
+            Works in Chrome &amp; Edge.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
-          <div className="flex gap-2">
-            <Input
-              value={localPath}
-              onChange={(e) => setLocalPath(e.target.value)}
-              placeholder="C:\path\to\your\site"
-              className="font-mono text-sm"
-            />
-            <Button
-              onClick={handleLocalImport}
-              disabled={importStatus === "loading" || !localPath.trim()}
-              className="shrink-0"
-            >
-              {importStatus === "loading" ? (
-                <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Loading…</>
-              ) : (
-                <><FolderOpen className="w-4 h-4 mr-2" />Import</>
-              )}
-            </Button>
-          </div>
+          <Button
+            onClick={handleLocalImport}
+            disabled={importStatus === "loading"}
+            className="w-full"
+          >
+            {importStatus === "loading" ? (
+              <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Reading files…</>
+            ) : (
+              <><FolderOpen className="w-4 h-4 mr-2" />Choose Folder…</>
+            )}
+          </Button>
 
           {importStatus === "done" && importCount && (
             <div className="flex items-center gap-2 text-sm text-green-700">
-              <span className="h-2 w-2 rounded-full bg-green-500 shrink-0" />
-              Imported — {importCount.html} HTML · {importCount.css} CSS · {importCount.js} JS · {importCount.image} images
+              <CheckCircle className="w-4 h-4 shrink-0" />
+              <span>
+                <span className="font-mono font-medium">{pickedDirName}</span>
+                {" — "}
+                {importCount.html} HTML · {importCount.css} CSS · {importCount.js} JS · {importCount.image} images
+              </span>
             </div>
           )}
 
