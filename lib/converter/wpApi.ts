@@ -246,7 +246,8 @@ export async function pushToWordPress(
   themeConfig: ThemeConfig,
   result: ConversionResult,
   onProgress?: (msg: string) => void,
-  pageIdentifier?: string
+  pageIdentifier?: string,
+  preUploadedImageUrls?: Record<string, string>
 ): Promise<PushResult> {
   // Log immediately — outside try/catch so it always prints even if something throws
   console.log(`[wpApi:START] pushToWordPress called`);
@@ -275,26 +276,35 @@ export async function pushToWordPress(
     // We never embed base64 data URLs — they bloat the payload past PHP's post_max_size.
     const imageUrlMap = new Map<string, string>();
 
-    console.log(`[wpApi] Images to upload: ${imageFiles.length}`);
-    onProgress?.(
-      `Uploading ${imageFiles.length} image${imageFiles.length !== 1 ? "s" : ""}...`
-    );
-
     let uploadedCount = 0;
-    for (const image of imageFiles) {
-      onProgress?.(
-        `Uploading ${image.name} (${uploadedCount + 1}/${imageFiles.length})...`
-      );
-      const wpUrl = await uploadImageToWp(base, auth, image);
-      if (wpUrl) {
-        imageUrlMap.set(image.name, wpUrl);
+    if (preUploadedImageUrls && Object.keys(preUploadedImageUrls).length > 0) {
+      // Reuse URLs from a previous upload — skip re-uploading
+      for (const [name, url] of Object.entries(preUploadedImageUrls)) {
+        imageUrlMap.set(name, url);
         uploadedCount++;
-        console.log(`[wpApi] ✓ Uploaded ${image.name} → ${wpUrl}`);
-      } else {
-        console.warn(`[wpApi] ✗ Failed to upload ${image.name}`);
       }
-      // Failed uploads: leave __WP_IMG__ placeholder — stripped to bare filename below.
-      // This keeps the payload small. Images will 404 but the page will load.
+      console.log(`[wpApi] Reusing ${uploadedCount} pre-uploaded image URL(s)`);
+      onProgress?.(`Reusing ${uploadedCount} already-uploaded image(s)...`);
+    } else {
+      console.log(`[wpApi] Images to upload: ${imageFiles.length}`);
+      onProgress?.(
+        `Uploading ${imageFiles.length} image${imageFiles.length !== 1 ? "s" : ""}...`
+      );
+
+      for (const image of imageFiles) {
+        onProgress?.(
+          `Uploading ${image.name} (${uploadedCount + 1}/${imageFiles.length})...`
+        );
+        const wpUrl = await uploadImageToWp(base, auth, image);
+        if (wpUrl) {
+          imageUrlMap.set(image.name, wpUrl);
+          uploadedCount++;
+          console.log(`[wpApi] ✓ Uploaded ${image.name} → ${wpUrl}`);
+        } else {
+          console.warn(`[wpApi] ✗ Failed to upload ${image.name}`);
+        }
+        // Failed uploads: leave __WP_IMG__ placeholder — stripped to bare filename below.
+      }
     }
 
     // Replace placeholders with real WP URLs where available.
@@ -643,10 +653,33 @@ function textToBase64(text: string): string {
   return btoa(bin);
 }
 
-const SKIP_JS_NAMES = new Set(["jquery.min.js", "jquery.js", "jquery-3.js"]);
+const SKIP_JS_NAMES = new Set([
+  "jquery.min.js", "jquery.js", "jquery-3.js",
+  "bootstrap.popper.min.js", "popper.min.js", "popper.js",
+]);
 
-function toHandle(filename: string): string {
-  return filename.replace(/\.[^.]+$/, "").replace(/[._]+/g, "-").toLowerCase();
+// JS files that must load before init.js (plugin libraries)
+const PLUGIN_JS_NAMES = new Set([
+  "owl.carousel.js", "owl.carousel.min.js",
+  "aos.js", "aos.min.js",
+  "bootstrap.bundle.min.js", "bootstrap.bundle.js",
+]);
+
+// CSS ordering: bootstrap → plugin CSS → custom/style.css → theme style.css
+const CSS_ORDER: Record<string, number> = {
+  "bootstrap.min.css": 0,
+  "bootstrap.css": 0,
+  "owl.carousel.css": 1,
+  "owl.carousel.min.css": 1,
+  "owl.theme.default.min.css": 2,
+  "owl.theme.default.css": 2,
+  "aos.css": 3,
+  "aos.min.css": 3,
+};
+
+function toHandle(themeSlug: string, filename: string): string {
+  const base = filename.replace(/\.[^.]+$/, "").replace(/[._]+/g, "-").toLowerCase();
+  return `${themeSlug}-${base}`;
 }
 
 function generateFunctionsPhp(
@@ -655,32 +688,180 @@ function generateFunctionsPhp(
   jsFiles: UploadedFile[],
 ): string {
   const phpSlug = themeSlug.replace(/-/g, "_");
-  const lines: string[] = [];
+  const uri = "get_stylesheet_directory_uri()";
 
-  // All CSS files → enqueue from local /css/ folder
-  for (const f of cssFiles) {
-    const handle = toHandle(f.name);
-    lines.push(`    wp_enqueue_style('${handle}', get_stylesheet_directory_uri() . '/css/${f.name}', array(), null);`);
+  // Sort CSS: known framework files first, then alphabetical for the rest
+  const sortedCss = [...cssFiles].sort((a, b) => {
+    const oa = CSS_ORDER[a.name.toLowerCase()] ?? 10;
+    const ob = CSS_ORDER[b.name.toLowerCase()] ?? 10;
+    return oa !== ob ? oa - ob : a.name.localeCompare(b.name);
+  });
+
+  // Separate plugin JS (owl, aos, bootstrap.bundle) from other JS
+  const pluginJs = jsFiles.filter(
+    (f) => !SKIP_JS_NAMES.has(f.name.toLowerCase()) && PLUGIN_JS_NAMES.has(f.name.toLowerCase())
+  );
+  const otherJs = jsFiles.filter(
+    (f) => !SKIP_JS_NAMES.has(f.name.toLowerCase()) && !PLUGIN_JS_NAMES.has(f.name.toLowerCase())
+      && f.name !== "init.js" && f.name !== "editor-init.js"
+  );
+
+  // Build CSS enqueue lines:
+  // - Plugin/framework CSS: each independent (no chained deps)
+  // - astra-child-style (root style.css): depends on astra-theme-css
+  // - custom-css (css/style.css): last, depends on astra-child-style
+  const cssLines: string[] = [];
+  for (const f of sortedCss) {
+    const handle = toHandle(themeSlug, f.name);
+    cssLines.push(`    wp_enqueue_style( '${handle}', ${uri} . '/css/${f.name}', array(), null );`);
   }
+  cssLines.push(`    wp_enqueue_style( 'astra-child-style', get_stylesheet_uri(), array( 'astra-theme-css' ), null );`);
+  cssLines.push(`    wp_enqueue_style( 'custom-css', ${uri} . '/css/style.css', array( 'astra-child-style' ), null );`);
 
-  // Astra child theme CSS — enqueue with parent dependency
-  lines.push(`    wp_enqueue_style('${phpSlug}-style', get_stylesheet_directory_uri() . '/style.css', array('astra-theme-css'), null);`);
-
-  // jQuery (WP built-in)
-  lines.push(`    wp_enqueue_script('jquery');`);
-
-  // All JS files → enqueue from local /js/ folder (skip jquery — WP provides it)
-  for (const f of jsFiles) {
-    if (SKIP_JS_NAMES.has(f.name.toLowerCase())) continue;
-    const handle = toHandle(f.name);
-    lines.push(`    wp_enqueue_script('${handle}', get_stylesheet_directory_uri() . '/js/${f.name}', array('jquery'), null, true);`);
+  // Build JS enqueue lines — order: jquery → plugin JS → other JS → init.js
+  const jsLines: string[] = [];
+  const pluginJsHandles: string[] = [];
+  for (const f of pluginJs) {
+    const handle = toHandle(themeSlug, f.name);
+    pluginJsHandles.push(`'${handle}'`);
+    jsLines.push(`    wp_enqueue_script( '${handle}', ${uri} . '/js/${f.name}', array( 'jquery' ), null, true );`);
   }
+  for (const f of otherJs) {
+    const handle = toHandle(themeSlug, f.name);
+    const deps = pluginJsHandles.length ? `'jquery', ${pluginJsHandles.join(", ")}` : `'jquery'`;
+    jsLines.push(`    wp_enqueue_script( '${handle}', ${uri} . '/js/${f.name}', array( ${deps} ), null, true );`);
+  }
+  const initDeps = ["'jquery'", ...pluginJsHandles].join(", ");
+  jsLines.push(`    wp_enqueue_script( 'theme-init', ${uri} . '/js/init.js', array( ${initDeps} ), null, true );`);
+
+  // add_editor_style takes paths relative to the theme root — no URI prefix needed
+  const editorCssPaths = [
+    ...sortedCss.map((f) => `css/${f.name}`),
+    "css/style.css",
+    "style.css",
+  ];
+  const editorCssArray = editorCssPaths.map((p) => `        '${p}',`).join("\n");
+
+  // Editor JS: owl (if present) + editor-init
+  const owlFile = pluginJs.find((f) => f.name.toLowerCase().includes("owl.carousel"));
+  const owlEditorEnqueue = owlFile
+    ? `    wp_enqueue_script( 'owl-carousel-editor', ${uri} . '/js/${owlFile.name}', array( 'jquery' ), null, true );\n`
+    : "";
+  const editorInitDeps = owlFile
+    ? `'jquery', 'owl-carousel-editor', 'wp-data'`
+    : `'jquery', 'wp-data'`;
 
   return `<?php
+if ( ! defined( 'ABSPATH' ) ) { exit; }
+
+// ── Editor style support ──────────────────────────────────────────────────────
+add_action( 'after_setup_theme', function () {
+    add_theme_support( 'editor-styles' );
+    add_editor_style( array(
+${editorCssArray}
+    ) );
+} );
+
+// ── Frontend assets ───────────────────────────────────────────────────────────
 function ${phpSlug}_enqueue_assets() {
-${lines.join("\n")}
+${cssLines.join("\n")}
+
+    wp_enqueue_script( 'jquery' );
+${jsLines.join("\n")}
 }
-add_action('wp_enqueue_scripts', '${phpSlug}_enqueue_assets', 15);
+add_action( 'wp_enqueue_scripts', '${phpSlug}_enqueue_assets', 15 );
+
+// ── Gutenberg editor assets ───────────────────────────────────────────────────
+add_action( 'enqueue_block_editor_assets', function () {
+    wp_enqueue_script( 'jquery' );
+${owlEditorEnqueue}    wp_enqueue_script(
+        'editor-init',
+        get_stylesheet_directory_uri() . '/js/editor-init.js',
+        array( ${editorInitDeps} ),
+        null,
+        true
+    );
+} );
+`;
+}
+
+function generateInitJs(jsFiles: UploadedFile[]): string {
+  const hasOwl = jsFiles.some((f) => f.name.toLowerCase().includes("owl.carousel"));
+  const hasAos  = jsFiles.some((f) => f.name.toLowerCase() === "aos.js" || f.name.toLowerCase() === "aos.min.js");
+
+  const owlBlock = hasOwl ? `
+	function initOwlCarousels() {
+		$('.owl-carousel').each(function () {
+			if ($(this).hasClass('owl-loaded')) { return; }
+			$(this).owlCarousel({
+				loop: true,
+				margin: 10,
+				nav: true,
+				responsive: { 0: { items: 1 }, 600: { items: 2 }, 992: { items: 3 } },
+			});
+		});
+	}` : "";
+
+  const aosBlock = hasAos ? `
+	function initAOS() {
+		if (typeof AOS === 'undefined') { return; }
+		AOS.init({ duration: 800, once: true });
+	}` : "";
+
+  const readyCalls = [
+    hasOwl ? "initOwlCarousels();" : null,
+    hasAos ? "initAOS();" : null,
+  ].filter(Boolean).join("\n\t\t");
+
+  return `(function ($) {
+\t'use strict';
+${owlBlock}${aosBlock}
+
+\t$(document).ready(function () {
+\t\t${readyCalls || "// add initializations here"}
+\t});
+})(jQuery);
+`;
+}
+
+function generateEditorInitJs(jsFiles: UploadedFile[]): string {
+  const hasOwl = jsFiles.some((f) => f.name.toLowerCase().includes("owl.carousel"));
+
+  const owlInit = hasOwl ? `
+	function initOwlCarousels() {
+		$('.owl-carousel').each(function () {
+			if ($(this).hasClass('owl-loaded')) { return; }
+			$(this).owlCarousel({
+				loop: true,
+				margin: 10,
+				nav: true,
+				responsive: { 0: { items: 1 }, 600: { items: 2 }, 992: { items: 3 } },
+			});
+		});
+	}
+
+	$(document).ready(function () {
+		initOwlCarousels();
+	});
+
+	if (typeof wp !== 'undefined' && wp.data) {
+		var prevBlockCount = 0;
+		wp.data.subscribe(function () {
+			var editor = wp.data.select('core/block-editor');
+			if (!editor) { return; }
+			var count = editor.getBlockCount();
+			if (count !== prevBlockCount) {
+				prevBlockCount = count;
+				setTimeout(initOwlCarousels, 100);
+			}
+		});
+	}` : `
+	// Add editor initializations here`;
+
+  return `(function ($) {
+\t'use strict';
+${owlInit}
+})(jQuery);
 `;
 }
 
@@ -976,25 +1157,40 @@ export async function deployChildTheme(
     }
 
     // ── Step 3: Upload images to WP media library ──
+    const imageUrlMap: Record<string, string> = {};
     if (imageFiles.length > 0) {
       onProgress?.(`Uploading ${imageFiles.length} image(s)...`);
       for (const img of imageFiles) {
         onProgress?.(`Uploading image: ${img.name}...`);
         const wpUrl = await uploadImageToWp(base, auth, img);
-        if (wpUrl) uploaded.push(img.name);
+        if (wpUrl) { uploaded.push(img.name); imageUrlMap[img.name] = wpUrl; }
         else warnings.push(`Image ${img.name}: upload failed`);
       }
     }
 
-    // ── Step 4: Write custom style.css to theme root (if provided) ──
+    // ── Step 4: Write custom CSS to css/style.css (loaded last by functions.php) ──
     if (customStyleCss) {
-      onProgress?.("Uploading custom style.css...");
-      const styleResult = await uploadToTheme(base, auth, "style.css", textToBase64(customStyleCss));
-      if (styleResult.success) uploaded.push("style.css");
-      else warnings.push(`style.css: ${styleResult.error}`);
+      onProgress?.("Uploading css/style.css...");
+      const styleResult = await uploadToTheme(base, auth, "css/style.css", textToBase64(customStyleCss));
+      if (styleResult.success) uploaded.push("css/style.css");
+      else warnings.push(`css/style.css: ${styleResult.error}`);
     }
 
-    // ── Step 5: Write final functions.php ──
+    // ── Step 5: Write init.js ──
+    onProgress?.("Writing js/init.js...");
+    const initJs = generateInitJs(jsFiles);
+    const initJsResult = await uploadToTheme(base, auth, "js/init.js", textToBase64(initJs));
+    if (initJsResult.success) uploaded.push("init.js");
+    else warnings.push(`init.js: ${initJsResult.error}`);
+
+    // ── Step 6: Write editor-init.js ──
+    onProgress?.("Writing js/editor-init.js...");
+    const editorInitJs = generateEditorInitJs(jsFiles);
+    const editorInitResult = await uploadToTheme(base, auth, "js/editor-init.js", textToBase64(editorInitJs));
+    if (editorInitResult.success) uploaded.push("editor-init.js");
+    else warnings.push(`editor-init.js: ${editorInitResult.error}`);
+
+    // ── Step 7: Write final functions.php ──
     onProgress?.("Updating functions.php...");
     const newFunctionsPhp = generateFunctionsPhp(themeSlug, cssFiles, jsFiles);
 
@@ -1006,6 +1202,7 @@ export async function deployChildTheme(
       success: true,
       uploaded,
       skipped,
+      imageUrlMap,
       warning: warnings.length > 0 ? warnings.join(" | ") : undefined,
     };
   } catch (err) {
@@ -1019,7 +1216,8 @@ export async function pushAsElementorTemplate(
   themeConfig: ThemeConfig,
   result: ConversionResult,
   onProgress?: (msg: string) => void,
-  pageIdentifier?: string
+  pageIdentifier?: string,
+  preUploadedImageUrls?: Record<string, string>
 ): Promise<TemplateResult> {
   try {
     const base = connection.siteUrl.replace(/\/$/, "");
@@ -1030,12 +1228,20 @@ export async function pushAsElementorTemplate(
     const imageFiles = result.assetFiles.filter((f) => f.type === "image");
     const imageUrlMap = new Map<string, string>();
 
-    onProgress?.(`Uploading ${imageFiles.length} image(s)...`);
     let uploadedCount = 0;
-    for (const image of imageFiles) {
-      onProgress?.(`Uploading ${image.name} (${uploadedCount + 1}/${imageFiles.length})...`);
-      const wpUrl = await uploadImageToWp(base, auth, image);
-      if (wpUrl) { imageUrlMap.set(image.name, wpUrl); uploadedCount++; }
+    if (preUploadedImageUrls && Object.keys(preUploadedImageUrls).length > 0) {
+      for (const [name, url] of Object.entries(preUploadedImageUrls)) {
+        imageUrlMap.set(name, url);
+        uploadedCount++;
+      }
+      onProgress?.(`Reusing ${uploadedCount} already-uploaded image(s)...`);
+    } else {
+      onProgress?.(`Uploading ${imageFiles.length} image(s)...`);
+      for (const image of imageFiles) {
+        onProgress?.(`Uploading ${image.name} (${uploadedCount + 1}/${imageFiles.length})...`);
+        const wpUrl = await uploadImageToWp(base, auth, image);
+        if (wpUrl) { imageUrlMap.set(image.name, wpUrl); uploadedCount++; }
+      }
     }
 
     let cssContent = result.pageCss;

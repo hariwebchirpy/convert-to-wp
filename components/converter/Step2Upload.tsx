@@ -1,13 +1,14 @@
 "use client";
 
 import { useRef, useState, useCallback, useEffect } from "react";
-import { UploadCloud, X, FileCode, FileText, Image, FileJson, FolderOpen, Loader2, AlertCircle } from "lucide-react";
+import { UploadCloud, X, FileCode, FileText, Image, FileJson, FolderOpen, Loader2, AlertCircle, CheckCircle, Palette } from "lucide-react";
 import { UploadedFile, ThemeConfig, PageEntry } from "@/types/converter";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 
 interface Props {
@@ -19,6 +20,8 @@ interface Props {
   onPagesReady: (pages: PageEntry[], thenGoToStep3?: boolean) => void;
   onNext: () => void;
   onBack: () => void;
+  customStyleCss: string | null;
+  onCustomStyleCss: (css: string | null) => void;
 }
 
 type FileCategory = "html" | "css" | "js" | "image";
@@ -77,6 +80,10 @@ const CATEGORY_CONFIG: Record<
     tip: "All images referenced in your HTML or CSS. Filename must match exactly what your HTML src= attributes reference (e.g. if HTML says src='images/hero.png', upload hero.png).",
   },
 };
+
+function toSlug(name: string): string {
+  return name.toLowerCase().trim().replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "");
+}
 
 function getFileType(name: string): UploadedFile["type"] {
   const ext = name.split(".").pop()?.toLowerCase() ?? "";
@@ -234,17 +241,44 @@ function DropZone({
 
 export default function Step2Upload({
   uploadedFiles,
+  themeConfig,
   onAddFiles,
   onRemoveFile,
+  onUpdateThemeConfig,
   onPagesReady,
   onNext,
   onBack,
+  customStyleCss,
+  onCustomStyleCss,
 }: Props) {
   const htmlFiles  = uploadedFiles.filter((f) => f.type === "html");
   const cssFiles   = uploadedFiles.filter((f) => f.type === "css");
   const jsFiles    = uploadedFiles.filter((f) => f.type === "js");
   const imageFiles = uploadedFiles.filter((f) => f.type === "image");
   const hasHtml    = htmlFiles.length > 0;
+  const hasThemeName = themeConfig.themeName.trim() !== "";
+
+  // Custom style.css drop zone
+  const customStyleInputRef = useRef<HTMLInputElement>(null);
+  const [customStyleDragging, setCustomStyleDragging] = useState(false);
+
+  function readCustomStyleFile(file: File) {
+    const reader = new FileReader();
+    reader.onload = (e) => onCustomStyleCss(e.target?.result as string ?? null);
+    reader.readAsText(file);
+  }
+
+  function handleCustomStyleDrop(e: React.DragEvent) {
+    e.preventDefault();
+    setCustomStyleDragging(false);
+    const file = e.dataTransfer.files[0];
+    if (file) readCustomStyleFile(file);
+  }
+
+  function handleCustomStylePick(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (file) readCustomStyleFile(file);
+  }
 
   // Local import state
   const [localPath, setLocalPath] = useState("C:\\Users\\HARI_JOHNSON\\Downloads\\_static");
@@ -364,6 +398,67 @@ export default function Step2Upload({
         </CardContent>
       </Card>
 
+      {/* ── Theme Details ── */}
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="flex items-center gap-2 text-base">
+            <Palette className="w-4 h-4 text-violet-500" />
+            Theme Details
+          </CardTitle>
+          <CardDescription>Name and metadata for your WordPress theme.</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid grid-cols-2 gap-4">
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium">Theme Name <span className="text-destructive">*</span></label>
+              <Input
+                placeholder="My Theme"
+                value={themeConfig.themeName}
+                onChange={(e) => {
+                  const name = e.target.value;
+                  onUpdateThemeConfig({ themeName: name, themeSlug: toSlug(name) });
+                }}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium">Theme Slug</label>
+              <Input
+                placeholder="my-theme"
+                value={themeConfig.themeSlug}
+                onChange={(e) => onUpdateThemeConfig({ themeSlug: e.target.value })}
+              />
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium">Author</label>
+              <Input
+                placeholder="Your Name"
+                value={themeConfig.author}
+                onChange={(e) => onUpdateThemeConfig({ author: e.target.value })}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium">Version</label>
+              <Input
+                placeholder="1.0.0"
+                value={themeConfig.version}
+                onChange={(e) => onUpdateThemeConfig({ version: e.target.value })}
+              />
+            </div>
+          </div>
+          <div className="space-y-1.5">
+            <label className="text-sm font-medium">Description</label>
+            <Textarea
+              placeholder="A short description of the theme"
+              rows={2}
+              value={themeConfig.description}
+              onChange={(e) => onUpdateThemeConfig({ description: e.target.value })}
+            />
+          </div>
+        </CardContent>
+      </Card>
+
       {/* ── Divider ── */}
       <div className="relative flex items-center">
         <div className="flex-1 border-t" />
@@ -467,6 +562,70 @@ export default function Step2Upload({
         </CardContent>
       </Card>
 
+      {/* ── Custom style.css ── */}
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="flex items-center gap-2 text-base">
+            <FileText className="w-4 h-4 text-purple-500" />
+            Custom style.css
+            <span className="text-xs font-normal text-muted-foreground">(optional)</span>
+          </CardTitle>
+          <CardDescription>
+            Drop your custom <code className="text-xs bg-muted px-1 rounded">style.css</code> here to overwrite the child theme root{" "}
+            <code className="text-xs bg-muted px-1 rounded">style.css</code> on deploy.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <input
+            ref={customStyleInputRef}
+            type="file"
+            accept=".css,text/css"
+            className="hidden"
+            onChange={handleCustomStylePick}
+          />
+          <div
+            onDragOver={(e) => { e.preventDefault(); setCustomStyleDragging(true); }}
+            onDragLeave={() => setCustomStyleDragging(false)}
+            onDrop={handleCustomStyleDrop}
+            onClick={() => customStyleInputRef.current?.click()}
+            className={cn(
+              "flex flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed px-4 py-6 cursor-pointer transition-colors select-none",
+              customStyleDragging
+                ? "border-primary bg-primary/5"
+                : customStyleCss
+                ? "border-green-400 bg-green-50"
+                : "border-muted-foreground/25 hover:border-muted-foreground/45 hover:bg-muted/20"
+            )}
+          >
+            {customStyleCss ? (
+              <div className="flex items-center gap-2 text-xs text-green-700">
+                <CheckCircle className="w-4 h-4 shrink-0" />
+                <span>style.css loaded ({(customStyleCss.length / 1024).toFixed(1)} KB)</span>
+                <button
+                  onClick={(e) => { e.stopPropagation(); onCustomStyleCss(null); }}
+                  className="ml-2 text-muted-foreground hover:text-destructive"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            ) : (
+              <>
+                <FileText className="w-6 h-6 text-purple-400" />
+                <p className="text-xs font-medium text-center">Drop style.css here</p>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-7 text-xs"
+                  onClick={(e) => { e.stopPropagation(); customStyleInputRef.current?.click(); }}
+                >
+                  Browse
+                </Button>
+              </>
+            )}
+          </div>
+        </CardContent>
+      </Card>
+
       {/* ── No HTML warning ── */}
       {uploadedFiles.length > 0 && !hasHtml && (
         <Alert className="border-amber-200 bg-amber-50 text-amber-800">
@@ -487,13 +646,13 @@ export default function Step2Upload({
       <div className="space-y-2">
         <div className="flex gap-3">
           <Button variant="outline" onClick={onBack}>← Back</Button>
-          <Button className="flex-1" disabled={!hasHtml} onClick={handleNext}>
+          <Button className="flex-1" disabled={!hasHtml || !hasThemeName} onClick={handleNext}>
             Next: Convert {htmlFiles.length > 1 ? `${htmlFiles.length} Pages` : ""} →
           </Button>
         </div>
-        {!hasHtml && (
+        {(!hasHtml || !hasThemeName) && (
           <p className="text-xs text-muted-foreground text-center">
-            Upload at least one HTML file to continue
+            {!hasThemeName ? "Enter a theme name to continue" : "Upload at least one HTML file to continue"}
           </p>
         )}
       </div>

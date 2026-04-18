@@ -96,8 +96,41 @@ export function buildTheme(
   // PHP function names cannot contain hyphens — convert to underscores
   const phpSafeSlug = themeSlug.replace(/-/g, "_");
 
-  const cssFiles = uploadedFiles.filter((f) => f.type === "css");
-  const jsFiles = uploadedFiles.filter((f) => f.type === "js");
+  // Synthetic files for inline <style> and <script> content extracted from the HTML
+  const allFiles: UploadedFile[] = [...uploadedFiles];
+
+  if (parsed.inlineCss.trim().length > 0) {
+    const existing = allFiles.find((f) => f.name === "html_style.css");
+    if (!existing) {
+      allFiles.push({
+        id: "inline-css",
+        name: "html_style.css",
+        type: "css",
+        content: parsed.inlineCss,
+        size: parsed.inlineCss.length,
+        file: new File([parsed.inlineCss], "html_style.css", { type: "text/css" }),
+      });
+      console.log(`[buildTheme] Created html_style.css from inline <style> tags (${Math.round(parsed.inlineCss.length / 1024)}KB)`);
+    }
+  }
+
+  if (parsed.inlineJs.trim().length > 0) {
+    const existing = allFiles.find((f) => f.name === "html_script.js");
+    if (!existing) {
+      allFiles.push({
+        id: "inline-js",
+        name: "html_script.js",
+        type: "js",
+        content: parsed.inlineJs,
+        size: parsed.inlineJs.length,
+        file: new File([parsed.inlineJs], "html_script.js", { type: "text/javascript" }),
+      });
+      console.log(`[buildTheme] Created html_script.js from inline <script> tags (${Math.round(parsed.inlineJs.length / 1024)}KB)`);
+    }
+  }
+
+  const cssFiles = allFiles.filter((f) => f.type === "css");
+  const jsFiles = allFiles.filter((f) => f.type === "js");
 
   // Large framework CSS files that ship their own CDN and are already included
   // by most WP themes — exclude from pageCss to keep REST API payload small.
@@ -148,16 +181,29 @@ export function buildTheme(
     return css;
   }
 
-  // ── style.css — WordPress theme header only ──
-  // Individual CSS files live in assets/css/ and are enqueued via functions.php.
-  // The root style.css must only contain the theme header comment.
+  // ── style.css — theme header + custom CSS only ──
+  // Framework/plugin CSS files are enqueued by file path in functions.php — exclude them.
+  const ENQUEUED_BY_FUNCTIONS = new Set([
+    "bootstrap.min.css", "bootstrap.css",
+    "font-awesome.min.css", "font-awesome-min.css", "all.min.css",
+    "owl.carousel.css", "owl.carousel.min.css",
+    "owl.theme.default.min.css", "owl.theme.default.css",
+    "aos.css", "aos.min.css",
+  ]);
+
+  const customCssContent = cssFiles
+    .filter((f) => !ENQUEUED_BY_FUNCTIONS.has(f.name.toLowerCase()))
+    .map((f) => f.content)
+    .join("\n\n");
+
   const styleCss = `/*
 Theme Name: ${themeName}
 Theme URI:
 Author: ${author}
 Description: ${description}
 Version: ${version}
-*/`;
+*/
+${customCssContent ? "\n" + customCssContent : ""}`.trimEnd();
 
   // ── functions.php ──
   // Skip jQuery — WordPress includes it automatically. Registering it again causes conflicts.
@@ -221,7 +267,7 @@ add_action('wp_enqueue_scripts', '${phpSafeSlug}_enqueue_assets');
 `;
 
   // ── header.php ──
-  const headerHtmlReplaced = replaceAssetPaths(parsed.headerHtml, uploadedFiles);
+  const headerHtmlReplaced = replaceAssetPaths(parsed.headerHtml, allFiles);
   const headerPhp = `<!DOCTYPE html>
 <html <?php language_attributes(); ?>>
 <head>
@@ -233,14 +279,14 @@ add_action('wp_enqueue_scripts', '${phpSafeSlug}_enqueue_assets');
 ${headerHtmlReplaced}`;
 
   // ── footer.php ──
-  const footerHtmlReplaced = replaceAssetPaths(parsed.footerHtml, uploadedFiles);
+  const footerHtmlReplaced = replaceAssetPaths(parsed.footerHtml, allFiles);
   const footerPhp = `${footerHtmlReplaced}
 <?php wp_footer(); ?>
 </body>
 </html>`;
 
   // ── index.php ──
-  const mainHtmlReplaced = replaceAssetPaths(parsed.mainHtml, uploadedFiles);
+  const mainHtmlReplaced = replaceAssetPaths(parsed.mainHtml, allFiles);
   const indexPhp = `<?php get_header(); ?>
 <main>
   ${mainHtmlReplaced}
@@ -249,11 +295,11 @@ ${headerHtmlReplaced}`;
 
   const { json: elementorJson, widgetMap } = buildElementorJson(
     parsed.sections,
-    uploadedFiles,
+    allFiles,
     parsed.title || themeConfig.themeName
   );
 
-  const rawHtmlFinal = (frameworkInlineHead ? frameworkInlineHead + "\n" : "") + replaceAssetPathsPlain(parsed.mainHtml, uploadedFiles);
+  const rawHtmlFinal = (frameworkInlineHead ? frameworkInlineHead + "\n" : "") + replaceAssetPathsPlain(parsed.mainHtml, allFiles);
 
   console.log(`[buildTheme] CSS files total: ${cssFiles.length} (${cssFiles.map((f) => f.name).join(", ") || "none"})`);
   console.log(`[buildTheme] CSS files inlined (framework): ${skippedFrameworks.length} (${skippedFrameworks.map((f) => f.name).join(", ") || "none"})`);
@@ -265,7 +311,7 @@ ${headerHtmlReplaced}`;
   widgetMap.forEach((section) =>
     console.log(`  [section] ${section.sectionId} — ${section.widgets.length} widget(s)`)
   );
-  console.log(`[buildTheme] assetFiles to upload: ${uploadedFiles.filter((f) => f.type !== "html").length}`);
+  console.log(`[buildTheme] assetFiles to upload: ${allFiles.filter((f) => f.type !== "html").length}`);
   if (frameworkInlineHead) {
     console.log(`[buildTheme] Framework CDN links prepended to rawHtml:\n${frameworkInlineHead}`);
   }
@@ -281,6 +327,6 @@ ${headerHtmlReplaced}`;
     elementorJson,
     rawHtml: rawHtmlFinal,
     widgetMap,
-    assetFiles: uploadedFiles.filter((f) => f.type !== "html"),
+    assetFiles: allFiles.filter((f) => f.type !== "html"),
   };
 }

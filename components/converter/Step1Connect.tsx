@@ -10,10 +10,8 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Separator } from "@/components/ui/separator";
 import { testWpConnection } from "@/lib/converter/wpApi";
 import AppPasswordGuide from "@/components/converter/AppPasswordGuide";
 
@@ -25,6 +23,7 @@ interface Props {
   onConnectionSuccess: (connection: WpConnection, profile: WpUserProfile) => void;
   onNext: () => void;
 }
+
 
 type TestStatus = "idle" | "loading" | "success" | "error";
 
@@ -47,12 +46,10 @@ function isValidUrl(url: string): boolean {
 
 export default function Step1Connect({
   wpConnection,
-  themeConfig,
   onUpdateWpConnection,
-  onUpdateThemeConfig,
   onConnectionSuccess,
   onNext,
-}: Props) {
+}: Omit<Props, "themeConfig" | "onUpdateThemeConfig">) {
   const [testStatus, setTestStatus] = useState<TestStatus>("idle");
   const [connectedProfile, setConnectedProfile] = useState<WpUserProfile | null>(null);
   const [showPassword, setShowPassword] = useState(false);
@@ -61,8 +58,7 @@ export default function Step1Connect({
   const canProceed =
     wpConnection.siteUrl.trim() !== "" &&
     wpConnection.username.trim() !== "" &&
-    wpConnection.appPassword.trim() !== "" &&
-    themeConfig.themeName.trim() !== "";
+    wpConnection.appPassword.trim() !== "";
 
   const showRestPreview =
     wpConnection.siteUrl.trim() !== "" &&
@@ -87,13 +83,6 @@ export default function Step1Connect({
       setTestStatus("error");
       onUpdateWpConnection({ isConnected: false });
     }
-  }
-
-  function handleThemeNameChange(name: string) {
-    onUpdateThemeConfig({
-      themeName: name,
-      themeSlug: toSlug(name),
-    });
   }
 
   return (
@@ -223,73 +212,6 @@ export default function Step1Connect({
                 Connection failed
               </Badge>
             )}
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* ── Separator ── */}
-      <div className="relative flex items-center">
-        <Separator className="flex-1" />
-        <span className="mx-3 text-xs text-muted-foreground bg-muted/30 px-1">
-          then
-        </span>
-        <Separator className="flex-1" />
-      </div>
-
-      {/* ── Card 2: Theme Details ── */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Theme Details</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="space-y-1.5">
-            <label className="text-sm font-medium">Theme Name</label>
-            <Input
-              placeholder="My Theme"
-              value={themeConfig.themeName}
-              onChange={(e) => handleThemeNameChange(e.target.value)}
-            />
-          </div>
-
-          <div className="space-y-1.5">
-            <label className="text-sm font-medium">Theme Slug</label>
-            <Input
-              placeholder="my-theme"
-              value={themeConfig.themeSlug}
-              onChange={(e) =>
-                onUpdateThemeConfig({ themeSlug: e.target.value })
-              }
-            />
-          </div>
-
-          <div className="space-y-1.5">
-            <label className="text-sm font-medium">Author</label>
-            <Input
-              placeholder="Your Name"
-              value={themeConfig.author}
-              onChange={(e) => onUpdateThemeConfig({ author: e.target.value })}
-            />
-          </div>
-
-          <div className="space-y-1.5">
-            <label className="text-sm font-medium">Description</label>
-            <Textarea
-              placeholder="A short description of the theme"
-              rows={3}
-              value={themeConfig.description}
-              onChange={(e) =>
-                onUpdateThemeConfig({ description: e.target.value })
-              }
-            />
-          </div>
-
-          <div className="space-y-1.5">
-            <label className="text-sm font-medium">Version</label>
-            <Input
-              placeholder="1.0.0"
-              value={themeConfig.version}
-              onChange={(e) => onUpdateThemeConfig({ version: e.target.value })}
-            />
           </div>
         </CardContent>
       </Card>

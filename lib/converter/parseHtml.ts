@@ -43,6 +43,18 @@ export function parseHtml(htmlContent: string): ParsedHtml {
     doc.querySelectorAll<HTMLScriptElement>("script[src]")
   ).map((el) => el.getAttribute("src") ?? "");
 
+  // ── inline styles ── (all <style> tags, excluding Elementor-generated ones)
+  const inlineCss = Array.from(doc.querySelectorAll<HTMLStyleElement>("style"))
+    .map((el) => el.textContent ?? "")
+    .filter((s) => s.trim().length > 0)
+    .join("\n\n");
+
+  // ── inline scripts ── (all <script> tags without a src attribute)
+  const inlineJs = Array.from(doc.querySelectorAll<HTMLScriptElement>("script:not([src])"))
+    .map((el) => el.textContent ?? "")
+    .filter((s) => s.trim().length > 0)
+    .join("\n\n");
+
   // ── header ──
   const headerEl =
     doc.querySelector("header") ?? doc.querySelector("nav") ?? null;
@@ -138,6 +150,8 @@ export function parseHtml(htmlContent: string): ParsedHtml {
   );
   console.log(`[parseHtml] Linked CSS files: ${linkedCssFiles.length}`, linkedCssFiles);
   console.log(`[parseHtml] Linked JS files: ${linkedJsFiles.length}`, linkedJsFiles);
+  console.log(`[parseHtml] Inline CSS: ${Math.round(inlineCss.length / 1024)}KB`);
+  console.log(`[parseHtml] Inline JS: ${Math.round(inlineJs.length / 1024)}KB`);
   console.groupEnd();
 
   return {
@@ -149,5 +163,7 @@ export function parseHtml(htmlContent: string): ParsedHtml {
     title,
     linkedCssFiles,
     linkedJsFiles,
+    inlineCss,
+    inlineJs,
   };
 }

@@ -54,9 +54,12 @@ const initialState: ConverterState = {
   activePageId: null,
 };
 
+
 export default function ConverterPage() {
   const [state, setState] = useState<ConverterState>(initialState);
   const [welcomeNote, setWelcomeNote] = useState<string | null>(null);
+  const [customStyleCss, setCustomStyleCss] = useState<string | null>(null);
+  const [selectedTheme, setSelectedTheme] = useState<string | null>(null);
 
   // Load persisted connection on mount
   useEffect(() => {
@@ -224,9 +227,7 @@ export default function ConverterPage() {
       {state.currentStep === 1 && (
         <Step1Connect
           wpConnection={state.wpConnection}
-          themeConfig={state.themeConfig}
           onUpdateWpConnection={updateWpConnection}
-          onUpdateThemeConfig={updateThemeConfig}
           onConnectionSuccess={handleConnectionSuccess}
           onNext={() => goToStep(2)}
         />
@@ -242,6 +243,8 @@ export default function ConverterPage() {
           onPagesReady={handlePagesReady}
           onNext={() => goToStep(3)}
           onBack={() => goToStep(1)}
+          customStyleCss={customStyleCss}
+          onCustomStyleCss={setCustomStyleCss}
         />
       )}
 
@@ -276,6 +279,9 @@ export default function ConverterPage() {
           activePageId={state.activePageId}
           onSetActivePage={setActivePage}
           onBack={() => goToStep(3)}
+          customStyleCss={customStyleCss}
+          selectedTheme={selectedTheme}
+          onSelectedTheme={setSelectedTheme}
         />
       )}
     </div>

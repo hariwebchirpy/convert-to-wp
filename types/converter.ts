@@ -15,6 +15,8 @@ export interface ParsedHtml {
   title: string;
   linkedCssFiles: string[];
   linkedJsFiles: string[];
+  inlineCss: string;   // all <style> tag contents concatenated
+  inlineJs: string;    // all inline <script> (non-src) contents concatenated
 }
 
 export type ConversionStatus = "idle" | "converting" | "done" | "error";
@@ -86,6 +88,7 @@ export interface ChildThemeDeployResult {
   success: boolean;
   uploaded: string[];
   skipped: string[];
+  imageUrlMap?: Record<string, string>;  // filename → WP media URL for uploaded images
   error?: string;
   warning?: string;
 }
