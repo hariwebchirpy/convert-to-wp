@@ -4,14 +4,17 @@ import {
   extractBorderRadius,
   extractBgColor,
   extractAlignment,
+  extractSpacing,
 } from "./styleParser";
 
+// Elementor button widget valid type values (maps to button_type control)
 function resolveButtonType(cls: string): string {
-  if (cls.includes("btn-primary") || cls.includes("btn-dark")) return "info";
   if (cls.includes("btn-outline")) return "outline";
   if (cls.includes("btn-success")) return "success";
   if (cls.includes("btn-danger") || cls.includes("btn-warning")) return "warning";
-  return "default";
+  if (cls.includes("btn-info")) return "info";
+  // "default" is NOT a valid Elementor button_type — use empty string
+  return "";
 }
 
 function resolveButtonSize(cls: string): string {
@@ -20,21 +23,25 @@ function resolveButtonSize(cls: string): string {
   return "md";
 }
 
-export function buildButtonWidget(element: Element): ElementorWidget {
+export function buildButtonWidget(element: Element, resolvedStyles: Record<string, string> = {}): ElementorWidget {
   const text = element.textContent?.trim() || "Click here";
-  const href = element.getAttribute("href") ?? "#";
+  // <button> has no href; <a> does. Elementor button widget renders as <a> always.
+  const href = element.getAttribute("href") ?? "";
   const cls = element.getAttribute("class") ?? "";
-  const style = parseStyle(element.getAttribute("style") ?? "");
+  const inline = parseStyle(element.getAttribute("style") ?? "");
 
   const isExternal = href.startsWith("http");
   const opensNewTab = element.getAttribute("target") === "_blank";
 
   const btnType = resolveButtonType(cls);
   const btnSize = resolveButtonSize(cls);
-  const align = extractAlignment(element.parentElement ?? element);
-  const borderRadius = extractBorderRadius(element);
-  const bgColor = extractBgColor(element);
+  const align = extractAlignment(element.parentElement ?? element, resolvedStyles);
+  const borderRadius = extractBorderRadius(element, resolvedStyles);
+  // Elementor button widget uses "button_background_color" not "background_color"
+  const bgColor = extractBgColor(element, resolvedStyles);
+  const style = { ...resolvedStyles, ...inline };
   const textColor = style["color"];
+  const spacing = extractSpacing(element, resolvedStyles);
 
   return {
     id: randomId(),
@@ -43,14 +50,16 @@ export function buildButtonWidget(element: Element): ElementorWidget {
     settings: {
       text,
       link: {
-        url: href,
+        url: href || "#",
         is_external: isExternal || opensNewTab,
         nofollow: false,
       },
+      // Empty string = Elementor's "Default" style (not the string "default")
       button_type: btnType,
       size: btnSize,
       align,
-      ...(bgColor ? { background_color: bgColor } : {}),
+      // Correct Elementor button color keys
+      ...(bgColor ? { button_background_color: bgColor } : {}),
       ...(textColor ? { button_text_color: textColor } : {}),
       ...(borderRadius !== undefined
         ? {
@@ -64,6 +73,7 @@ export function buildButtonWidget(element: Element): ElementorWidget {
             },
           }
         : {}),
+      ...(spacing.padding ? { padding: spacing.padding } : {}),
     },
     elements: [],
   };

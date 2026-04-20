@@ -125,11 +125,11 @@ function WidgetRow({
 
         {/* Warning icon for complex/HTML widgets */}
         {node.isComplex && (
-          <span className="relative group/tip shrink-0">
+          <span className="relative group/tip shrink-0 flex items-center gap-1">
             <AlertTriangle size={13} className="text-amber-500" />
-            <span className="pointer-events-none absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 hidden group-hover/tip:block w-56 rounded bg-zinc-900 px-2.5 py-1.5 text-[11px] text-zinc-100 shadow-lg z-50 leading-relaxed">
-              This element could not be fully mapped. It will appear as an HTML
-              widget in Elementor and may need manual adjustment.
+            <span className="text-[10px] font-medium text-amber-600 hidden sm:inline">Not natively editable</span>
+            <span className="pointer-events-none absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 hidden group-hover/tip:block w-64 rounded bg-zinc-900 px-2.5 py-1.5 text-[11px] text-zinc-100 shadow-lg z-50 leading-relaxed">
+              Preserved as a raw HTML widget. Renders correctly on the frontend but cannot be drag-and-drop edited in Elementor — JS-dependent components (carousels, tabs, modals) or complex layouts fall into this category.
             </span>
           </span>
         )}
@@ -206,17 +206,14 @@ function SummaryBar({ widgetMap }: { widgetMap: WidgetMapItem[] }) {
         <div className="flex gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-800 leading-relaxed">
           <AlertTriangle size={14} className="shrink-0 mt-0.5 text-amber-500" />
           <span>
-            <strong>{htmlCount} element{htmlCount !== 1 ? "s" : ""}</strong> could not
-            be auto-mapped and will appear as HTML widgets in Elementor. These are
-            marked in red above and may need manual adjustment after import.
+            <strong>{htmlCount} element{htmlCount !== 1 ? "s" : ""}</strong> could not be mapped to native Elementor widgets — JS-dependent components (carousels, sliders, tabs) and complex layouts are preserved as HTML widgets. They render correctly on the frontend but require manual editing in Elementor.
           </span>
         </div>
       ) : (
         <div className="flex gap-2 rounded-md border border-green-200 bg-green-50 px-3 py-2.5 text-xs text-green-800 leading-relaxed">
           <CheckCircle2 size={14} className="shrink-0 mt-0.5 text-green-600" />
           <span>
-            All elements were successfully mapped to native Elementor widgets.
-            No manual cleanup needed.
+            All elements mapped to native Elementor widgets — fully drag-and-drop editable.
           </span>
         </div>
       )}

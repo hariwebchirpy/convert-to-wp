@@ -7,11 +7,13 @@ function extractFilename(src: string): string {
 
 export function buildImageWidget(
   element: Element,
-  uploadedFiles: UploadedFile[]
+  uploadedFiles: UploadedFile[],
+  resolvedStyles: Record<string, string> = {}
 ): ElementorWidget {
   const src = element.getAttribute("src") ?? "";
   const alt = element.getAttribute("alt") ?? "";
-  const style = parseStyle(element.getAttribute("style") ?? "");
+  const inline = parseStyle(element.getAttribute("style") ?? "");
+  const style = { ...resolvedStyles, ...inline };
 
   const filename = extractFilename(src);
   const matched = uploadedFiles.find((f) => f.name === filename);
@@ -38,7 +40,8 @@ export function buildImageWidget(
   // Alignment from parent or own classes
   const cls = element.getAttribute("class") ?? "";
   const parentCls = element.parentElement?.getAttribute("class") ?? "";
-  let align = "none";
+  // Elementor image widget align: "left" | "center" | "right" | "" (empty = none)
+  let align = "";
   const combined = `${cls} ${parentCls}`;
   if (combined.includes("mx-auto") || combined.includes("d-block") || combined.includes("text-center")) {
     align = "center";

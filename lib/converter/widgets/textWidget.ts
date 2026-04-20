@@ -5,9 +5,9 @@ import {
   buildTypographySettings,
 } from "./styleParser";
 
-export function buildTextWidget(element: Element): ElementorWidget {
-  const typo = extractTypography(element);
-  const align = extractAlignment(element);
+export function buildTextWidget(element: Element, resolvedStyles: Record<string, string> = {}): ElementorWidget {
+  const typo = extractTypography(element, resolvedStyles);
+  const align = extractAlignment(element, resolvedStyles);
 
   // Use innerHTML so inline formatting (strong, em, a, span) is preserved
   const editor = element.innerHTML.trim();

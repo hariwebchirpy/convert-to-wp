@@ -1,5 +1,6 @@
-import { ParsedSection, UploadedFile, WidgetMapItem } from "@/types/converter";
+import { ParsedSection, UploadedFile, WidgetMapItem, ConversionMode } from "@/types/converter";
 import { walkSections } from "./domWalker";
+import { buildSelectorMap } from "./cssParser";
 
 export interface ElementorBuildResult {
   json: string;
@@ -25,9 +26,12 @@ export interface ElementorBuildResult {
 export function buildElementorJson(
   sections: ParsedSection[],
   uploadedFiles: UploadedFile[],
-  title = "Converted Page"
+  title = "Converted Page",
+  mode: ConversionMode = "php-theme",
+  cssTexts: string[] = []
 ): ElementorBuildResult {
-  const { sections: nodes, widgetMap } = walkSections(sections, uploadedFiles);
+  const selectorMap = mode === "elementor-widgets" ? buildSelectorMap(cssTexts) : new Map();
+  const { sections: nodes, widgetMap } = walkSections(sections, uploadedFiles, mode, selectorMap);
 
   const template = {
     version: "0.4",
@@ -49,8 +53,11 @@ export function buildElementorJson(
  */
 export function buildElementorDataMeta(
   sections: ParsedSection[],
-  uploadedFiles: UploadedFile[]
+  uploadedFiles: UploadedFile[],
+  mode: ConversionMode = "php-theme",
+  cssTexts: string[] = []
 ): string {
-  const { sections: nodes } = walkSections(sections, uploadedFiles);
+  const selectorMap = mode === "elementor-widgets" ? buildSelectorMap(cssTexts) : new Map();
+  const { sections: nodes } = walkSections(sections, uploadedFiles, mode, selectorMap);
   return JSON.stringify(nodes);
 }

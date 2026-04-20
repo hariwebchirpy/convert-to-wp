@@ -10,6 +10,7 @@ import {
   UploadedFile,
   ConversionResult,
   ConversionStatus,
+  ConversionMode,
   PageEntry,
 } from "@/types/converter";
 import {
@@ -47,6 +48,7 @@ const initialState: ConverterState = {
   userProfile: null,
   uploadedFiles: [],
   themeConfig: defaultThemeConfig,
+  conversionMode: "php-theme",
   conversionStatus: "idle",
   conversionResult: null,
   error: null,
@@ -184,6 +186,10 @@ export default function ConverterPage() {
     });
   }
 
+  function handleConversionModeChange(mode: ConversionMode) {
+    setState((prev) => ({ ...prev, conversionMode: mode }));
+  }
+
   function handleConnectionSuccess(connection: WpConnection, profile: WpUserProfile) {
     saveConnection({ ...connection, isConnected: true });
     saveUserProfile(profile);
@@ -252,6 +258,8 @@ export default function ConverterPage() {
         <Step3Convert
           uploadedFiles={activePageFiles}
           themeConfig={state.themeConfig}
+          conversionMode={state.conversionMode}
+          onConversionModeChange={handleConversionModeChange}
           conversionStatus={state.conversionStatus}
           conversionResult={state.conversionResult}
           error={state.error}

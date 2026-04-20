@@ -1,4 +1,4 @@
-import { ParsedHtml, ThemeConfig, UploadedFile, ConversionResult } from "@/types/converter";
+import { ParsedHtml, ThemeConfig, UploadedFile, ConversionResult, ConversionMode } from "@/types/converter";
 import { buildElementorJson } from "./elementorJson";
 
 // Maps file type to the assets subfolder name
@@ -82,7 +82,8 @@ function replaceCssAssetPathsForPageCss(css: string, files: UploadedFile[]): str
 export function buildTheme(
   parsed: ParsedHtml,
   themeConfig: ThemeConfig,
-  uploadedFiles: UploadedFile[]
+  uploadedFiles: UploadedFile[],
+  mode: ConversionMode = "php-theme"
 ): ConversionResult {
   console.group("[buildTheme] Starting theme build");
   console.log(`[buildTheme] Theme: "${themeConfig.themeName}" slug="${themeConfig.themeSlug}"`);
@@ -206,23 +207,55 @@ Version: ${version}
 ${customCssContent ? "\n" + customCssContent : ""}`.trimEnd();
 
   // ── functions.php ──
-  // Skip jQuery — WordPress includes it automatically. Registering it again causes conflicts.
+  // Skip jQuery — WordPress includes it automatically.
   const SKIP_JS = new Set(["jquery.min.js", "jquery.js", "jquery-3.js"]);
+  // Skip preconnect/dns-prefetch — not stylesheet links
+  const SKIP_CSS_REL = new Set(["preconnect", "dns-prefetch", "preload"]);
 
-  // Sanitize handle: strip extension, replace dots/underscores with hyphens
   function toHandle(filename: string): string {
-    return filename.replace(/\.[^.]+$/, "").replace(/[._]+/g, "-").toLowerCase();
+    return filename.replace(/\.[^.]+$/, "").replace(/[^a-z0-9]+/gi, "-").toLowerCase();
   }
+
+  function usesJQuery(content: string): boolean {
+    return /\$\s*\(|\bjQuery\s*\(/.test(content);
+  }
+
+  // ── External CSS <link> tags from the HTML <head> ──────────────────────────
+  // These are CDN/font URLs (Google Fonts, Bootstrap CDN, etc.) that were in
+  // the original HTML <head>. They must be enqueued in functions.php — otherwise
+  // fonts and CDN stylesheets are completely missing from the WP theme.
+  const externalCssEnqueues = parsed.linkedCssFiles
+    .filter((href) => href.startsWith("http") || href.startsWith("//"))
+    .map((href, i) => {
+      const handle = `${phpSafeSlug}-ext-css-${i}`;
+      return `  wp_enqueue_style(\n    '${handle}',\n    '${href}',\n    array(),\n    null\n  );`;
+    })
+    .join("\n\n");
+
+  // ── External JS <script src> tags from the HTML <head/body> ───────────────
+  // CDN scripts (e.g. Bootstrap bundle, AOS from CDN) must be enqueued too.
+  const SKIP_EXT_JS = new Set(["jquery", "jquery.min", "jquery-3"]);
+  const externalJsEnqueues = parsed.linkedJsFiles
+    .filter((src) => src.startsWith("http") || src.startsWith("//"))
+    .filter((src) => {
+      const base = src.split("/").pop()?.replace(/\.[^.]+$/, "").toLowerCase() ?? "";
+      return !SKIP_EXT_JS.has(base);
+    })
+    .map((src, i) => {
+      const handle = `${phpSafeSlug}-ext-js-${i}`;
+      return `  wp_enqueue_script(\n    '${handle}',\n    '${src}',\n    array(),\n    null,\n    true\n  );`;
+    })
+    .join("\n\n");
 
   const FRAMEWORK_CDN: Record<string, string> = {
     "bootstrap.min.css": "https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css",
     "bootstrap.css":     "https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css",
-    "font-awesome.min.css": "https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.3/css/all.min.css",
-    "font-awesome-min.css": "https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.3/css/all.min.css",
-    "all.min.css":          "https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.3/css/all.min.css",
+    "font-awesome.min.css": "https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css",
+    "font-awesome-min.css": "https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css",
+    "all.min.css":          "https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css",
   };
 
-  // Framework files get CDN enqueue in functions.php; custom files get local asset enqueue.
+  // Local uploaded CSS files — framework filenames get CDN URL, others get local path
   const cssEnqueues = cssFiles
     .map((f) => {
       const handle = toHandle(f.name);
@@ -234,34 +267,43 @@ ${customCssContent ? "\n" + customCssContent : ""}`.trimEnd();
     })
     .join("\n\n");
 
-  // pageCss: only custom CSS files for REST push. Frameworks excluded — CDN <link> added to rawHtml instead.
-  // Also strip any Bootstrap block that was concatenated inside a custom CSS file.
+  // pageCss: custom CSS for REST push. Frameworks excluded — CDN <link> added to rawHtml.
   const pageCss = cssFiles
     .filter((f) => !SKIP_PAGE_CSS.has(f.name.toLowerCase()))
     .map((f) => replaceCssAssetPathsForPageCss(stripBootstrapFromCss(f.content), uploadedFiles))
     .join("\n\n");
 
-  // CDN <link> tags for framework CSS — prepended to rawHtml for the REST push path.
+  // CDN <link> + external font tags for the REST push path (prepended to rawHtml)
   const skippedFrameworks = cssFiles.filter((f) => SKIP_PAGE_CSS.has(f.name.toLowerCase()));
-  const frameworkInlineHead = skippedFrameworks
+  const frameworkLinks = skippedFrameworks
     .map((f) => {
       const cdnUrl = FRAMEWORK_CDN[f.name.toLowerCase()];
       return cdnUrl ? `<link rel="stylesheet" href="${cdnUrl}">` : "";
     })
-    .filter(Boolean)
-    .join("\n");
+    .filter(Boolean);
+  // Also include external CSS links from the HTML head (Google Fonts etc.) for REST push
+  const externalCssLinks = parsed.linkedCssFiles
+    .filter((href) => href.startsWith("http") || href.startsWith("//"))
+    .map((href) => `<link rel="stylesheet" href="${href}">`);
+  const frameworkInlineHead = [...frameworkLinks, ...externalCssLinks].join("\n");
 
+  // Local uploaded JS files
   const jsEnqueues = jsFiles
     .filter((f) => !SKIP_JS.has(f.name.toLowerCase()))
     .map((f) => {
       const handle = toHandle(f.name);
-      return `  wp_enqueue_script(\n    '${phpSafeSlug}-${handle}',\n    get_template_directory_uri() . '/assets/js/${f.name}',\n    array('jquery'),\n    '${version}',\n    true\n  );`;
+      const deps = usesJQuery(f.content) ? "array('jquery')" : "array()";
+      return `  wp_enqueue_script(\n    '${phpSafeSlug}-${handle}',\n    get_template_directory_uri() . '/assets/js/${f.name}',\n    ${deps},\n    '${version}',\n    true\n  );`;
     })
     .join("\n\n");
 
+  // Combine all enqueue lines — external first (fonts/CDN load before local files)
+  const allCssEnqueues = [externalCssEnqueues, cssEnqueues].filter(Boolean).join("\n\n");
+  const allJsEnqueues  = [externalJsEnqueues,  jsEnqueues ].filter(Boolean).join("\n\n");
+
   const functionsPhp = `<?php
 function ${phpSafeSlug}_enqueue_assets() {
-${cssEnqueues}${cssEnqueues && jsEnqueues ? "\n\n" : ""}${jsEnqueues}
+${allCssEnqueues}${allCssEnqueues && allJsEnqueues ? "\n\n" : ""}${allJsEnqueues}
 }
 add_action('wp_enqueue_scripts', '${phpSafeSlug}_enqueue_assets');
 `;
@@ -293,13 +335,30 @@ ${headerHtmlReplaced}`;
 </main>
 <?php get_footer(); ?>`;
 
+  // Collect CSS text for the style resolver (elementor-widgets mode only)
+  const cssTexts = allFiles
+    .filter((f) => f.type === "css")
+    .map((f) => f.content);
+
   const { json: elementorJson, widgetMap } = buildElementorJson(
     parsed.sections,
     allFiles,
-    parsed.title || themeConfig.themeName
+    parsed.title || themeConfig.themeName,
+    mode,
+    cssTexts
   );
 
-  const rawHtmlFinal = (frameworkInlineHead ? frameworkInlineHead + "\n" : "") + replaceAssetPathsPlain(parsed.mainHtml, allFiles);
+  // For the REST push path, inline JS must be injected directly into rawHtml —
+  // functions.php enqueues html_script.js for the ZIP theme, but the REST-pushed
+  // page has no theme assets, so all animations/interactions would be dead without this.
+  const inlineScriptTag = parsed.inlineJs.trim()
+    ? `\n<script>${parsed.inlineJs}</script>`
+    : "";
+
+  const rawHtmlFinal =
+    (frameworkInlineHead ? frameworkInlineHead + "\n" : "") +
+    replaceAssetPathsPlain(parsed.mainHtml, allFiles) +
+    inlineScriptTag;
 
   console.log(`[buildTheme] CSS files total: ${cssFiles.length} (${cssFiles.map((f) => f.name).join(", ") || "none"})`);
   console.log(`[buildTheme] CSS files inlined (framework): ${skippedFrameworks.length} (${skippedFrameworks.map((f) => f.name).join(", ") || "none"})`);

@@ -8,17 +8,21 @@ import {
   Circle,
   Copy,
   Check,
+  Sparkles,
 } from "lucide-react";
 import {
   UploadedFile,
   ThemeConfig,
   ConversionStatus,
   ConversionResult,
+  ConversionMode,
   ProgressStep,
   PageEntry,
+  ElementorSection,
 } from "@/types/converter";
 import { parseHtml } from "@/lib/converter/parseHtml";
 import { buildTheme } from "@/lib/converter/buildTheme";
+import { parseCss } from "@/lib/converter/cssParser";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -35,6 +39,8 @@ import JsonInspector from "@/components/converter/JsonInspector";
 interface Props {
   uploadedFiles: UploadedFile[];
   themeConfig: ThemeConfig;
+  conversionMode: ConversionMode;
+  onConversionModeChange: (mode: ConversionMode) => void;
   conversionStatus: ConversionStatus;
   conversionResult: ConversionResult | null;
   error: string | null;
@@ -55,6 +61,15 @@ const INITIAL_STEPS: ProgressStep[] = [
   { label: "Mapping elements to Elementor widgets", status: "pending" },
   { label: "Generating WordPress theme files", status: "pending" },
   { label: "Building Elementor JSON", status: "pending" },
+  { label: "Conversion complete", status: "pending" },
+];
+
+const AI_INITIAL_STEPS: ProgressStep[] = [
+  { label: "Reading HTML files", status: "pending" },
+  { label: "Parsing HTML structure", status: "pending" },
+  { label: "Generating WordPress theme files", status: "pending" },
+  { label: "Sending sections to Claude AI", status: "pending" },
+  { label: "Building AI-powered Elementor JSON", status: "pending" },
   { label: "Conversion complete", status: "pending" },
 ];
 
@@ -142,6 +157,8 @@ function lineCount(s: string) {
 export default function Step3Convert({
   uploadedFiles,
   themeConfig,
+  conversionMode,
+  onConversionModeChange,
   conversionStatus,
   conversionResult,
   error,
@@ -198,7 +215,7 @@ export default function Step3Convert({
 
       setStep(2, "running");
       await sleep(300);
-      const result = buildTheme(parsed, themeConfig, uploadedFiles);
+      const result = buildTheme(parsed, themeConfig, uploadedFiles, conversionMode);
       const totalWidgets = result.widgetMap.reduce(
         (acc, s) => acc + s.widgets.length,
         0
@@ -222,6 +239,248 @@ export default function Step3Convert({
       setStep(5, "done");
 
       onConvert(result);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Unknown error";
+      setProgressSteps((prev) => {
+        const firstRunning = prev.findIndex(
+          (s) => s.status === "running" || s.status === "pending"
+        );
+        return prev.map((s, i) =>
+          i === firstRunning
+            ? { ...s, status: "error", label: `${s.label} — ${msg}` }
+            : s
+        );
+      });
+      onStatusChange("error", msg);
+    }
+  }
+
+  // Extract all CSS rules relevant to a section's HTML and inject as custom_css
+  function injectScopedCss(section: ElementorSection, sectionHtml: string, cssText: string): ElementorSection {
+    if (!cssText.trim()) return section;
+
+    const selectorMap = parseCss(cssText);
+
+    // Collect all classes and tag names from the section HTML
+    const classMatches = sectionHtml.match(/class="([^"]+)"/g) ?? [];
+    const tagMatches = sectionHtml.match(/<([a-z][a-z0-9]*)/gi) ?? [];
+
+    const usedClasses = new Set<string>();
+    for (const m of classMatches) {
+      const val = m.slice(7, -1); // strip class="..."
+      for (const cls of val.split(/\s+/)) {
+        if (cls) usedClasses.add(`.${cls}`);
+      }
+    }
+    const usedTags = new Set<string>();
+    for (const m of tagMatches) {
+      usedTags.add(m.slice(1).toLowerCase());
+    }
+
+    // Build scoped CSS string for all matching rules
+    const lines: string[] = [];
+    for (const [selector, props] of selectorMap) {
+      // Match plain class selectors, tag selectors, and descendant combos
+      const rootSel = selector.split(/[\s>+~]/)[0];
+      const matches =
+        usedClasses.has(rootSel) ||
+        usedTags.has(rootSel) ||
+        [...usedClasses].some((c) => selector.includes(c));
+      if (!matches) continue;
+
+      const declarations = Object.entries(props)
+        .map(([k, v]) => `  ${k}: ${v};`)
+        .join("\n");
+      if (declarations) lines.push(`${selector} {\n${declarations}\n}`);
+    }
+
+    if (lines.length === 0) return section;
+
+    const scopedCss = lines.join("\n");
+    const existing = (section.settings?.custom_css as string) ?? "";
+    return {
+      ...section,
+      settings: {
+        ...section.settings,
+        custom_css: existing ? `${existing}\n${scopedCss}` : scopedCss,
+      },
+    };
+  }
+
+  async function callClaudeSection(
+    sectionHtml: string,
+    cssContext: string,
+    sectionIndex: number,
+    totalSections: number
+  ): Promise<ElementorSection | null> {
+    const res = await fetch("/api/claude", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        task: "convert_to_elementor",
+        html: sectionHtml,
+        css: cssContext,
+        sectionIndex,
+        totalSections,
+      }),
+    });
+
+    if (!res.ok || !res.body) return null;
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let accumulated = "";
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = decoder.decode(value, { stream: true });
+      for (const line of chunk.split("\n")) {
+        if (!line.startsWith("data:")) continue;
+        const payload = line.slice(5).trim();
+        if (payload === "[DONE]") break;
+        try {
+          const parsed = JSON.parse(payload) as { text?: string; error?: string };
+          if (parsed.text) accumulated += parsed.text;
+        } catch {
+          // skip malformed SSE lines
+        }
+      }
+    }
+
+    // Extract JSON from the accumulated response (strip any markdown fences)
+    const jsonMatch = accumulated.match(/```(?:json)?\s*([\s\S]*?)```/) ??
+      accumulated.match(/(\{[\s\S]*\})/);
+    const jsonStr = jsonMatch ? jsonMatch[1].trim() : accumulated.trim();
+
+    try {
+      return JSON.parse(jsonStr) as ElementorSection;
+    } catch {
+      return null;
+    }
+  }
+
+  async function runAiConversion() {
+    setProgressSteps(AI_INITIAL_STEPS);
+    setActiveTab("widget-map");
+    onStatusChange("converting");
+
+    try {
+      // Step 0: read files
+      setProgressSteps((p) => p.map((s, i) => i === 0 ? { ...s, status: "running" } : s));
+      await sleep(200);
+      const htmlFiles = uploadedFiles.filter((f) => f.type === "html");
+      const combinedHtml = htmlFiles.map((f) => f.content).join("\n");
+      const cssFiles = uploadedFiles.filter((f) => f.type === "css");
+      const fullCss = cssFiles.map((f) => f.content).join("\n");
+      const cssContext = fullCss.slice(0, 20000); // cap context sent to API
+      setProgressSteps((p) => p.map((s, i) => i === 0 ? { ...s, status: "done" } : s));
+
+      // Step 1: parse HTML
+      setProgressSteps((p) => p.map((s, i) => i === 1 ? { ...s, status: "running" } : s));
+      await sleep(200);
+      const parsed = parseHtml(combinedHtml);
+      setProgressSteps((p) => p.map((s, i) => i === 1 ? { ...s, status: "done" } : s));
+
+      // Step 2: build base theme (PHP files, CSS, rawHtml)
+      setProgressSteps((p) => p.map((s, i) => i === 2 ? { ...s, status: "running" } : s));
+      await sleep(200);
+      const baseResult = buildTheme(parsed, themeConfig, uploadedFiles, conversionMode);
+      setProgressSteps((p) => p.map((s, i) => i === 2 ? { ...s, status: "done" } : s));
+
+      // Step 3: call Claude AI for each section
+      const totalSections = parsed.sections.length;
+      setProgressSteps((p) =>
+        p.map((s, i) =>
+          i === 3
+            ? { ...s, status: "running", label: `Sending sections to Claude AI — 0 / ${totalSections} done` }
+            : s
+        )
+      );
+
+      const aiSections: ElementorSection[] = [];
+      for (let idx = 0; idx < totalSections; idx++) {
+        const section = parsed.sections[idx];
+        const aiNode = await callClaudeSection(
+          section.html,
+          cssContext,
+          idx,
+          totalSections
+        );
+        // Fall back to base result section if AI fails
+        if (aiNode) {
+          aiNode.id = `ai${idx}${Math.random().toString(16).slice(2, 8)}`;
+          // Inject scoped CSS for any styles Claude may have missed
+          const withCss = injectScopedCss(aiNode, section.html, fullCss);
+          aiSections.push(withCss);
+        } else {
+          // parse the base elementorJson and grab the matching section
+          try {
+            const baseTemplate = JSON.parse(baseResult.elementorJson) as {
+              content: ElementorSection[];
+            };
+            const fallback = baseTemplate.content[idx];
+            if (fallback) aiSections.push(fallback);
+          } catch {
+            // ignore
+          }
+        }
+        setProgressSteps((p) =>
+          p.map((s, i) =>
+            i === 3
+              ? { ...s, label: `Sending sections to Claude AI — ${idx + 1} / ${totalSections} done` }
+              : s
+          )
+        );
+      }
+
+      setProgressSteps((p) => p.map((s, i) => i === 3 ? { ...s, status: "done" } : s));
+
+      // Step 4: rebuild elementorJson with AI sections
+      setProgressSteps((p) => p.map((s, i) => i === 4 ? { ...s, status: "running" } : s));
+      await sleep(200);
+
+      const baseTemplate = JSON.parse(baseResult.elementorJson) as {
+        version: string;
+        title: string;
+        type: string;
+        content: ElementorSection[];
+        page_settings: Record<string, unknown>;
+      };
+      const aiTemplate = { ...baseTemplate, content: aiSections };
+      const aiElementorJson = JSON.stringify(aiTemplate, null, 2);
+
+      // Build widget map from AI sections for display
+      const aiWidgetMap = aiSections.map((sec, idx) => ({
+        sectionId: sec.id ?? `ai-${idx}`,
+        sectionLabel: `AI Section ${idx + 1}`,
+        widgets: sec.elements?.flatMap((col) =>
+          (col.elements ?? []).map((w) => ({
+            type: w.widgetType ?? "html",
+            label: String(
+              (w.settings?.title as string) ??
+              (w.settings?.text as string) ??
+              (w.settings?.html as string)?.slice(0, 40) ??
+              w.widgetType ??
+              "widget"
+            ),
+            tag: "div",
+            isComplex: w.widgetType === "html",
+          }))
+        ) ?? [],
+      }));
+
+      const aiResult: ConversionResult = {
+        ...baseResult,
+        elementorJson: aiElementorJson,
+        widgetMap: aiWidgetMap,
+      };
+
+      setProgressSteps((p) => p.map((s, i) => i === 4 ? { ...s, status: "done" } : s));
+
+      // Step 5: done
+      setProgressSteps((p) => p.map((s, i) => i === 5 ? { ...s, status: "done" } : s));
+      onConvert(aiResult);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Unknown error";
       setProgressSteps((prev) => {
@@ -288,7 +547,7 @@ export default function Step3Convert({
         </Card>
       )}
 
-      {/* ── Idle: summary + start button ── */}
+      {/* ── Idle: summary + mode picker + start button ── */}
       {conversionStatus === "idle" && (
         <Card>
           <CardHeader>
@@ -314,9 +573,58 @@ export default function Step3Convert({
                 </span>
               </p>
             </div>
-            <Button className="w-full" onClick={runConversion}>
-              Start Conversion
-            </Button>
+
+            {/* ── Conversion mode picker ── */}
+            <div className="space-y-2">
+              <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Conversion Mode</p>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  onClick={() => onConversionModeChange("php-theme")}
+                  className={cn(
+                    "flex flex-col gap-1 rounded-lg border p-3 text-left transition-colors",
+                    conversionMode === "php-theme"
+                      ? "border-primary bg-primary/5 ring-1 ring-primary"
+                      : "border-muted hover:border-muted-foreground/40"
+                  )}
+                >
+                  <span className="text-sm font-semibold">PHP Theme</span>
+                  <span className="text-xs text-muted-foreground leading-snug">
+                    Exact visual fidelity. HTML preserved as-is inside Elementor HTML widgets.
+                  </span>
+                </button>
+                <button
+                  onClick={() => onConversionModeChange("elementor-widgets")}
+                  className={cn(
+                    "flex flex-col gap-1 rounded-lg border p-3 text-left transition-colors",
+                    conversionMode === "elementor-widgets"
+                      ? "border-primary bg-primary/5 ring-1 ring-primary"
+                      : "border-muted hover:border-muted-foreground/40"
+                  )}
+                >
+                  <span className="text-sm font-semibold">Elementor Widgets</span>
+                  <span className="text-xs text-muted-foreground leading-snug">
+                    Native drag-and-drop editing. Headings, images, buttons and columns become live widgets.
+                  </span>
+                </button>
+              </div>
+            </div>
+
+            <div className="flex flex-col gap-2">
+              <Button className="w-full" onClick={runConversion}>
+                Start Conversion
+              </Button>
+              <Button
+                variant="outline"
+                className="w-full gap-2"
+                onClick={runAiConversion}
+              >
+                <Sparkles className="w-4 h-4 text-purple-500" />
+                Convert with AI
+                <span className="ml-auto text-xs text-muted-foreground font-normal">
+                  Claude-powered · more accurate
+                </span>
+              </Button>
+            </div>
           </CardContent>
         </Card>
       )}
@@ -362,9 +670,15 @@ export default function Step3Convert({
         </Alert>
       )}
       {conversionStatus === "error" && (
-        <Button className="w-full" onClick={runConversion}>
-          Try Again
-        </Button>
+        <div className="flex gap-2">
+          <Button className="flex-1" onClick={runConversion}>
+            Try Again
+          </Button>
+          <Button variant="outline" className="flex-1 gap-2" onClick={runAiConversion}>
+            <Sparkles className="w-4 h-4 text-purple-500" />
+            Try with AI
+          </Button>
+        </div>
       )}
 
       {/* ── File preview tabs (including Widget Map) ── */}

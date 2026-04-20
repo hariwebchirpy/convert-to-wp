@@ -21,6 +21,8 @@ export interface ParsedHtml {
 
 export type ConversionStatus = "idle" | "converting" | "done" | "error";
 
+export type ConversionMode = "php-theme" | "elementor-widgets";
+
 export interface WpTheme {
   stylesheet: string;   // theme slug / directory name
   name: string;         // human-readable name
@@ -183,6 +185,7 @@ export interface ConverterState {
   userProfile: WpUserProfile | null;
   uploadedFiles: UploadedFile[];
   themeConfig: ThemeConfig;
+  conversionMode: ConversionMode;
   // Legacy single-page fields (kept for Step3/Step4 compat during migration)
   conversionStatus: ConversionStatus;
   conversionResult: ConversionResult | null;

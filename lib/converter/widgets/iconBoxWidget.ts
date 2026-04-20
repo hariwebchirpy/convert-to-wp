@@ -33,14 +33,14 @@ function extractIcon(element: Element): ElementorIcon {
   return { value: "fas fa-star", library: "fa-solid" };
 }
 
-export function buildIconBoxWidget(element: Element): ElementorWidget {
+export function buildIconBoxWidget(element: Element, resolvedStyles: Record<string, string> = {}): ElementorWidget {
   const children = Array.from(element.children);
 
   const headingEl = children.find((c) =>
     ["h1", "h2", "h3", "h4", "h5", "h6"].includes(c.tagName.toLowerCase())
   );
   const paragraphEl = children.find((c) => c.tagName.toLowerCase() === "p");
-  const align = extractAlignment(element);
+  const align = extractAlignment(element, resolvedStyles);
 
   const title = headingEl?.textContent?.trim() ?? "Title";
   const description = paragraphEl?.innerHTML?.trim() ?? "";
@@ -66,20 +66,39 @@ export function buildIconBoxWidget(element: Element): ElementorWidget {
 export function isIconBox(element: Element): boolean {
   const children = Array.from(element.children);
 
+  // Only consider small, self-contained card elements — not section containers.
+  // A real icon-box card has a tight set of direct children (icon + title + text).
+  // Large containers (sections, feature grids, nav, header, etc.) must not match.
+  if (children.length > 6) return false;
+
+  // Must NOT be a block-level section/article element with many descendants
+  const tag = element.tagName.toLowerCase();
+  if (["section", "article", "main", "header", "footer", "nav"].includes(tag)) return false;
+
+  // Heading must be a DIRECT child (not buried deep in descendants)
   const hasHeading = children.some((c) =>
     ["h1", "h2", "h3", "h4", "h5", "h6"].includes(c.tagName.toLowerCase())
   );
+  if (!hasHeading) return false;
+
+  // Paragraph must be a direct child too
   const hasParagraph = children.some((c) => c.tagName.toLowerCase() === "p");
+
+  // Icon: a direct child that looks like an icon element
   const hasIcon = children.some((c) => {
     const cls = c.getAttribute("class") ?? "";
     return (
       cls.includes("fa-") ||
-      cls.includes("icon") ||
       cls.includes("bi-") ||
       c.tagName.toLowerCase() === "i" ||
       c.tagName.toLowerCase() === "svg"
     );
   });
 
-  return hasHeading && (hasParagraph || hasIcon);
+  // Must have an icon to qualify — heading+paragraph alone is too generic and
+  // matches section containers, feature cards with only text, etc.
+  // Without an icon, use a text-editor widget instead (handled by isTextElement fallback).
+  if (!hasIcon) return false;
+
+  return true;
 }

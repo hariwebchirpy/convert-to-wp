@@ -5,11 +5,11 @@ import {
   buildTypographySettings,
 } from "./styleParser";
 
-export function buildHeadingWidget(element: Element): ElementorWidget {
+export function buildHeadingWidget(element: Element, resolvedStyles: Record<string, string> = {}): ElementorWidget {
   const text = element.innerHTML.trim();
   const tag = element.tagName.toLowerCase() as "h1" | "h2" | "h3" | "h4" | "h5" | "h6";
-  const typo = extractTypography(element);
-  const align = extractAlignment(element);
+  const typo = extractTypography(element, resolvedStyles);
+  const align = extractAlignment(element, resolvedStyles);
 
   return {
     id: randomId(),

@@ -499,42 +499,14 @@ export async function pushToWordPress(
     if (cssContent) {
       onProgress?.("Applying CSS...");
 
-      // Encode CSS as a base64 data URI and inject as <link href="data:text/css;base64,...">
-      // Data URIs bypass server file restrictions, LiteSpeed file-not-found issues,
-      // and WordPress mime-type blocking entirely. Browsers apply data URI stylesheets normally.
-      try {
-        const b64 = btoa(unescape(encodeURIComponent(cssContent)));
-        const dataUri = `data:text/css;base64,${b64}`;
-        const elSections = JSON.parse(patchedElementorJson) as Array<{
-          elType: string;
-          elements: Array<{ elType: string; elements: Array<Record<string, unknown>> }>;
-        }>;
-        if (elSections.length > 0 && elSections[0].elements?.length > 0) {
-          const firstCol = elSections[0].elements[0];
-          const widgets = firstCol.elements as Array<{ widgetType?: string; settings?: { html?: string } }>;
-          const cssWidget = widgets.find((w) => w.widgetType === "html" && w.settings?.html?.includes("<style>"));
-          if (cssWidget?.settings) {
-            cssWidget.settings.html = `<link rel="stylesheet" href="${dataUri}">`;
-            patchedElementorJson = JSON.stringify(elSections);
-            console.log(`[wpApi] ✓ CSS widget updated to data URI <link> (${Math.round(dataUri.length / 1024)}KB)`);
-            await fetch(`${base}/wp-json/wp/v2/pages/${pageId}`, {
-              method: "POST",
-              headers,
-              body: JSON.stringify({ meta: { _elementor_data: patchedElementorJson } }),
-            });
-          }
-        }
-      } catch (e) {
-        console.warn(`[wpApi] CSS data URI injection error:`, e);
-      }
-
-      // Clear Elementor cache
+      // Clear Elementor cache so the editor preview picks up the new _elementor_data
       try {
         await fetch(`${base}/wp-json/elementor/v1/cache`, { method: "DELETE", headers });
         console.log(`[wpApi] ✓ Elementor cache cleared`);
       } catch (e) { /* non-fatal */ }
 
-      // Customizer Additional CSS — fallback
+      // Customizer Additional CSS — loads via wp_head(), which the Elementor editor
+      // preview iframe calls normally. This is the most reliable editor CSS channel.
       try {
         console.log(`[wpApi] Fetching WP settings for Customizer CSS...`);
         const settingsRes = await fetch(`${base}/wp-json/wp/v2/settings`, {
@@ -553,7 +525,7 @@ export async function pushToWordPress(
             body: JSON.stringify({ custom_css: newCss }),
           });
           console.log(`[wpApi] Customizer CSS save: ${saveRes.status}`);
-          if (saveRes.ok) console.log(`[wpApi] ✓ Customizer CSS saved`);
+          if (saveRes.ok) console.log(`[wpApi] ✓ Customizer CSS saved (loads in editor via wp_head)`);
         }
       } catch (e) {
         console.warn(`[wpApi] Customizer CSS error:`, e);
@@ -706,19 +678,33 @@ function generateFunctionsPhp(
       && f.name !== "init.js" && f.name !== "editor-init.js"
   );
 
-  // Build CSS enqueue lines:
-  // - Plugin/framework CSS: each independent (no chained deps)
-  // - astra-child-style (root style.css): depends on astra-theme-css
-  // - custom-css (css/style.css): last, depends on astra-child-style
+  // Known framework CSS files that should be loaded from CDN instead of local
+  const CDN_CSS: Record<string, string> = {
+    "bootstrap.min.css": "https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css",
+    "bootstrap.css":     "https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css",
+    "font-awesome.min.css": "https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css",
+    "all.min.css":          "https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css",
+  };
+
+  // Build CSS enqueue lines — framework files use CDN, custom files use local path
   const cssLines: string[] = [];
   for (const f of sortedCss) {
     const handle = toHandle(themeSlug, f.name);
-    cssLines.push(`    wp_enqueue_style( '${handle}', ${uri} . '/css/${f.name}', array(), null );`);
+    const cdnUrl = CDN_CSS[f.name.toLowerCase()];
+    if (cdnUrl) {
+      cssLines.push(`    wp_enqueue_style( '${handle}', '${cdnUrl}', array(), null );`);
+    } else {
+      cssLines.push(`    wp_enqueue_style( '${handle}', ${uri} . '/css/${f.name}', array(), null );`);
+    }
   }
   cssLines.push(`    wp_enqueue_style( 'astra-child-style', get_stylesheet_uri(), array( 'astra-theme-css' ), null );`);
-  cssLines.push(`    wp_enqueue_style( 'custom-css', ${uri} . '/css/style.css', array( 'astra-child-style' ), null );`);
+  // Only enqueue css/style.css if a custom style file was actually uploaded
+  const hasCustomStyleCss = cssFiles.some((f) => f.name === "style.css");
+  if (hasCustomStyleCss) {
+    cssLines.push(`    wp_enqueue_style( 'custom-css', ${uri} . '/css/style.css', array( 'astra-child-style' ), null );`);
+  }
 
-  // Build JS enqueue lines — order: jquery → plugin JS → other JS → init.js
+  // Build JS enqueue lines — order: plugin JS → other JS → init.js (only if needed)
   const jsLines: string[] = [];
   const pluginJsHandles: string[] = [];
   for (const f of pluginJs) {
@@ -728,11 +714,26 @@ function generateFunctionsPhp(
   }
   for (const f of otherJs) {
     const handle = toHandle(themeSlug, f.name);
-    const deps = pluginJsHandles.length ? `'jquery', ${pluginJsHandles.join(", ")}` : `'jquery'`;
-    jsLines.push(`    wp_enqueue_script( '${handle}', ${uri} . '/js/${f.name}', array( ${deps} ), null, true );`);
+    // Only add jquery dep if the file actually uses it
+    const needsJquery = usesJQuery(f.content);
+    const deps = needsJquery
+      ? pluginJsHandles.length ? `'jquery', ${pluginJsHandles.join(", ")}` : `'jquery'`
+      : pluginJsHandles.length ? pluginJsHandles.join(", ") : "";
+    const depsStr = deps ? `array( ${deps} )` : `array()`;
+    jsLines.push(`    wp_enqueue_script( '${handle}', ${uri} . '/js/${f.name}', ${depsStr}, null, true );`);
   }
-  const initDeps = ["'jquery'", ...pluginJsHandles].join(", ");
-  jsLines.push(`    wp_enqueue_script( 'theme-init', ${uri} . '/js/init.js', array( ${initDeps} ), null, true );`);
+
+  // Only enqueue init.js if there are jQuery plugins that need initialisation
+  const hasOwl = pluginJs.some((f) => f.name.toLowerCase().includes("owl.carousel"));
+  const hasAos = pluginJs.some((f) => f.name.toLowerCase() === "aos.js" || f.name.toLowerCase() === "aos.min.js");
+  const needsInitJs = hasOwl || hasAos;
+  if (needsInitJs) {
+    const initDeps = ["'jquery'", ...pluginJsHandles].join(", ");
+    jsLines.push(`    wp_enqueue_script( 'theme-init', ${uri} . '/js/init.js', array( ${initDeps} ), null, true );`);
+  }
+
+  // Only enqueue jquery if something actually needs it
+  const anyJqueryNeeded = pluginJs.length > 0 || otherJs.some((f) => usesJQuery(f.content)) || needsInitJs;
 
   // add_editor_style takes paths relative to the theme root — no URI prefix needed
   const editorCssPaths = [
@@ -742,14 +743,29 @@ function generateFunctionsPhp(
   ];
   const editorCssArray = editorCssPaths.map((p) => `        '${p}',`).join("\n");
 
-  // Editor JS: owl (if present) + editor-init
+  // Editor JS: only enqueue editor-init.js if owl carousel is present
   const owlFile = pluginJs.find((f) => f.name.toLowerCase().includes("owl.carousel"));
+  const needsEditorInit = !!owlFile;
   const owlEditorEnqueue = owlFile
     ? `    wp_enqueue_script( 'owl-carousel-editor', ${uri} . '/js/${owlFile.name}', array( 'jquery' ), null, true );\n`
     : "";
   const editorInitDeps = owlFile
     ? `'jquery', 'owl-carousel-editor', 'wp-data'`
     : `'jquery', 'wp-data'`;
+
+  const editorJsBlock = needsEditorInit ? `
+// ── Gutenberg editor assets ───────────────────────────────────────────────────
+add_action( 'enqueue_block_editor_assets', function () {
+    wp_enqueue_script( 'jquery' );
+${owlEditorEnqueue}    wp_enqueue_script(
+        'editor-init',
+        get_stylesheet_directory_uri() . '/js/editor-init.js',
+        array( ${editorInitDeps} ),
+        null,
+        true
+    );
+} );
+` : "";
 
   return `<?php
 if ( ! defined( 'ABSPATH' ) ) { exit; }
@@ -765,29 +781,23 @@ ${editorCssArray}
 // ── Frontend assets ───────────────────────────────────────────────────────────
 function ${phpSlug}_enqueue_assets() {
 ${cssLines.join("\n")}
-
-    wp_enqueue_script( 'jquery' );
+${anyJqueryNeeded ? "\n    wp_enqueue_script( 'jquery' );" : ""}
 ${jsLines.join("\n")}
 }
 add_action( 'wp_enqueue_scripts', '${phpSlug}_enqueue_assets', 15 );
+${editorJsBlock}`;
+}
 
-// ── Gutenberg editor assets ───────────────────────────────────────────────────
-add_action( 'enqueue_block_editor_assets', function () {
-    wp_enqueue_script( 'jquery' );
-${owlEditorEnqueue}    wp_enqueue_script(
-        'editor-init',
-        get_stylesheet_directory_uri() . '/js/editor-init.js',
-        array( ${editorInitDeps} ),
-        null,
-        true
-    );
-} );
-`;
+function usesJQuery(content: string): boolean {
+  return /\$\s*\(|\bjQuery\s*\(/.test(content);
 }
 
 function generateInitJs(jsFiles: UploadedFile[]): string {
   const hasOwl = jsFiles.some((f) => f.name.toLowerCase().includes("owl.carousel"));
-  const hasAos  = jsFiles.some((f) => f.name.toLowerCase() === "aos.js" || f.name.toLowerCase() === "aos.min.js");
+  const hasAos = jsFiles.some((f) => f.name.toLowerCase() === "aos.js" || f.name.toLowerCase() === "aos.min.js");
+
+  // No jQuery plugins present — no init.js needed (return empty string signals caller to skip)
+  if (!hasOwl && !hasAos) return "";
 
   const owlBlock = hasOwl ? `
 	function initOwlCarousels() {
@@ -818,7 +828,7 @@ function generateInitJs(jsFiles: UploadedFile[]): string {
 ${owlBlock}${aosBlock}
 
 \t$(document).ready(function () {
-\t\t${readyCalls || "// add initializations here"}
+\t\t${readyCalls}
 \t});
 })(jQuery);
 `;
@@ -827,7 +837,12 @@ ${owlBlock}${aosBlock}
 function generateEditorInitJs(jsFiles: UploadedFile[]): string {
   const hasOwl = jsFiles.some((f) => f.name.toLowerCase().includes("owl.carousel"));
 
-  const owlInit = hasOwl ? `
+  // No owl carousel — no editor-init.js needed
+  if (!hasOwl) return "";
+
+  return `(function ($) {
+\t'use strict';
+
 	function initOwlCarousels() {
 		$('.owl-carousel').each(function () {
 			if ($(this).hasClass('owl-loaded')) { return; }
@@ -855,12 +870,7 @@ function generateEditorInitJs(jsFiles: UploadedFile[]): string {
 				setTimeout(initOwlCarousels, 100);
 			}
 		});
-	}` : `
-	// Add editor initializations here`;
-
-  return `(function ($) {
-\t'use strict';
-${owlInit}
+	}
 })(jQuery);
 `;
 }
@@ -1176,19 +1186,23 @@ export async function deployChildTheme(
       else warnings.push(`css/style.css: ${styleResult.error}`);
     }
 
-    // ── Step 5: Write init.js ──
-    onProgress?.("Writing js/init.js...");
+    // ── Step 5: Write init.js (only if owl/aos present) ──
     const initJs = generateInitJs(jsFiles);
-    const initJsResult = await uploadToTheme(base, auth, "js/init.js", textToBase64(initJs));
-    if (initJsResult.success) uploaded.push("init.js");
-    else warnings.push(`init.js: ${initJsResult.error}`);
+    if (initJs) {
+      onProgress?.("Writing js/init.js...");
+      const initJsResult = await uploadToTheme(base, auth, "js/init.js", textToBase64(initJs));
+      if (initJsResult.success) uploaded.push("init.js");
+      else warnings.push(`init.js: ${initJsResult.error}`);
+    }
 
-    // ── Step 6: Write editor-init.js ──
-    onProgress?.("Writing js/editor-init.js...");
+    // ── Step 6: Write editor-init.js (only if owl carousel present) ──
     const editorInitJs = generateEditorInitJs(jsFiles);
-    const editorInitResult = await uploadToTheme(base, auth, "js/editor-init.js", textToBase64(editorInitJs));
-    if (editorInitResult.success) uploaded.push("editor-init.js");
-    else warnings.push(`editor-init.js: ${editorInitResult.error}`);
+    if (editorInitJs) {
+      onProgress?.("Writing js/editor-init.js...");
+      const editorInitResult = await uploadToTheme(base, auth, "js/editor-init.js", textToBase64(editorInitJs));
+      if (editorInitResult.success) uploaded.push("editor-init.js");
+      else warnings.push(`editor-init.js: ${editorInitResult.error}`);
+    }
 
     // ── Step 7: Write final functions.php ──
     onProgress?.("Updating functions.php...");
